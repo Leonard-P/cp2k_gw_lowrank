@@ -19,7 +19,7 @@ MODULE gw_lowrank_approx
    USE mathconstants,                   ONLY: z_one,&
                                               z_zero
    USE mathlib,                         ONLY: gemm_square,&
-                                              diag_complex
+                                              diamat_all
    USE cp_files,                        ONLY: close_file,&
                                               open_file
    USE parallel_gemm_api,               ONLY: parallel_gemm
@@ -46,10 +46,10 @@ CONTAINS
    SUBROUTINE calculate_W_lowrank_projector(training_sum, L, bs_env)
       COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :), INTENT(IN)     :: training_sum
       TYPE(post_scf_bandstructure_type), POINTER                     :: bs_env
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :), INTENT(OUT)    :: L
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :), INTENT(OUT)       :: L
 
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)                       :: eigenvalues
-      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)                 :: eigenvectors
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)                    :: real_training_sum
 
       CHARACTER(LEN=*), PARAMETER                                    :: routineN = 'calculate_W_lowrank_projector'
       INTEGER                                                        :: handle, count, i, j, n_RI
@@ -59,15 +59,14 @@ CONTAINS
       CALL timeset(routineN, handle)
 
       n_RI = SIZE(training_sum, 1)
-      ALLOCATE(eigenvalues(n_RI), eigenvectors(n_RI, n_RI))
-   
+      ALLOCATE(eigenvalues(n_RI), real_training_sum(n_RI, n_RI))
+      real_training_sum(:, :) = REAL(training_sum, KIND=dp)
+
       ! eigenvalue decomposition of the training sum
-      CALL diag_complex(training_sum, eigenvectors, eigenvalues)
+      CALL diamat_all(real_training_sum, eigenvalues, dac=.TRUE.)
 
       real_part_norm_trainingsum = SUM(ABS(REAL(training_sum)))
-
       imag_part_norm_trainingsum = SUM(ABS(AIMAG(training_sum)))
-
       PRINT *, "imaginary part of training sum (should be close to zero): ", imag_part_norm_trainingsum
       PRINT *, "real part of training sum: ", real_part_norm_trainingsum
 
@@ -87,7 +86,7 @@ CONTAINS
       DO i = 1, n_RI
          IF (eigenvalues(i) > bs_env%low_rank_approx_W_eps) THEN
             j = j + 1
-            L(:, j) = REAL(eigenvectors(:, i))
+            L(:, j) = REAL(real_training_sum(:, i))
          END IF
       END DO
 
@@ -110,7 +109,7 @@ CONTAINS
    SUBROUTINE W_storage_pipeline(bs_env, freq_idx, MWM_R, mode)
       TYPE(post_scf_bandstructure_type), POINTER           :: bs_env
       INTEGER, INTENT(IN)                                  :: freq_idx
-      REAL(KIND=dp), DIMENSION(:, :, :), INTENT(INOUT)  :: MWM_R
+      REAL(KIND=dp), DIMENSION(:, :, :), INTENT(INOUT)     :: MWM_R
       CHARACTER(LEN=*), INTENT(IN)                         :: mode
 
       CHARACTER(LEN=default_string_length)                 :: filename

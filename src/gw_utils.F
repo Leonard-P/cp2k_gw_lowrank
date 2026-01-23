@@ -136,7 +136,7 @@ MODULE gw_utils
    PRIVATE
 
    PUBLIC :: create_and_init_bs_env_for_gw, de_init_bs_env, get_i_j_atoms, &
-             kpoint_init_cell_index_simple, compute_xkp, time_to_freq, analyt_conti_and_print, &
+             compute_xkp, time_to_freq, analyt_conti_and_print, &
              add_R, is_cell_in_index_to_cell, get_V_tr_R, power, write_reals_to_file, &
              low_rank_filter
 

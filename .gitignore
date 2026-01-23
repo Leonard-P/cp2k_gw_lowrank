@@ -97,9 +97,28 @@ dkms.conf
 ### CMake ###
 build*/
 
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+build.make
+link.txt
+*.cmake
+compile_commands.json
+src/CMakeFiles/
+
 # Spack
 build-*
 .spack_patched
+spack/
+.spack/
+opt/spack/
+tools/toolchain/spack/
+tools/spack/
+tools/spack/spack_repo/
+
+# PC2 Cluster
+libcp2k.pc
 
 ### CMake Patch ###
 # External projects
