@@ -2292,6 +2292,23 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      CALL keyword_create(keyword, __LOCATION__, name="LOW_RANK_APPROX_W_EPS", &
+                          description="Threshold for the low-rank approximation of the screened "// &
+                           "Coulomb interaction W. Small values lead to higher accuracy, 0 corresponds "// &
+                           "to no low-rank approximation.", &
+                          usage="LOW_RANK_APPROX_W_EPS 1.0E-4", &
+                          default_r_val=0.0_dp, type_of_var=real_t) 
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
+      CALL keyword_create(keyword, __LOCATION__, name="LOW_RANK_APPROX_M_EXPONENT", &
+                          description="Low-rank approximation is applied to M(k)^exponent W(k) M(k)^exponent."// &
+                           "Recommended values: -1, -0.5 or 0. Defaults to 0.", &
+                          usage="LOW_RANK_APPROX_M_EXPONENT -0.5", &
+                          default_r_val=0.0_dp, type_of_var=real_t) 
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+
       CALL keyword_create(keyword, __LOCATION__, name="MEMORY_PER_PROC", &
                           description="Specify the available memory per MPI process. Set "// &
                           "`MEMORY_PER_PROC` as accurately as possible for good performance. If "// &

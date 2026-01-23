@@ -137,7 +137,8 @@ MODULE gw_utils
 
    PUBLIC :: create_and_init_bs_env_for_gw, de_init_bs_env, get_i_j_atoms, &
              kpoint_init_cell_index_simple, compute_xkp, time_to_freq, analyt_conti_and_print, &
-             add_R, is_cell_in_index_to_cell, get_V_tr_R, power
+             add_R, is_cell_in_index_to_cell, get_V_tr_R, power, write_reals_to_file, &
+             low_rank_filter
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_utils'
 
@@ -290,6 +291,8 @@ CONTAINS
       CALL section_vals_val_get(gw_sec, "KPOINTS_W", i_vals=bs_env%nkp_grid_chi_eps_W_input)
       CALL section_vals_val_get(gw_sec, "HEDIN_SHIFT", l_val=bs_env%do_hedin_shift)
       CALL section_vals_val_get(gw_sec, "FREQ_MAX_FIT", r_val=bs_env%freq_max_fit)
+      CALL section_vals_val_get(gw_sec, "LOW_RANK_APPROX_W_EPS", r_val=bs_env%low_rank_approx_W_eps)
+      CALL section_vals_val_get(gw_sec, "LOW_RANK_APPROX_M_EXPONENT", r_val=bs_env%low_rank_approx_M_exponent)
 
       CALL timestop(handle)
 
@@ -3116,6 +3119,68 @@ CONTAINS
    END SUBROUTINE power
 
 ! **************************************************************************************************
+!> \brief Diagonalizes `matrix`, sets eigenvalues with magnitude < `eps` to zero, optionally prints 
+!> the fraction of discarded eigenvalues. Returns the modified matrix of lower rank.
+!> \param matrix ...
+!> \param eps ...
+!> \param eigenvalues_out ...
+!> \param print_discarded_fraction ...
+! **************************************************************************************************
+   SUBROUTINE low_rank_filter(matrix, eps, eigenvalues_out, print_discarded_count)
+      COMPLEX(KIND=dp), DIMENSION(:, :), INTENT(INOUT)   :: matrix
+      REAL(KIND=dp), INTENT(IN)                          :: eps
+      REAL(KIND=dp), OPTIONAL, DIMENSION(:), INTENT(OUT) :: eigenvalues_out
+      LOGICAL, OPTIONAL, INTENT(IN)                      :: print_discarded_count
+
+      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: eigenvectors, scaled_eigenvectors, matrix_orig
+      INTEGER                                            :: handle, i, n, discarded_cnt
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)           :: eigenvalues
+      REAL(KIND=dp)                                      :: matrix_diff_norm
+      
+      CHARACTER(len=*), PARAMETER                        :: routineN = 'low_rank_filter'
+
+      CALL timeset(routineN, handle)
+      n = SIZE(matrix, 1)
+
+      ALLOCATE(matrix_orig(n, n))
+      matrix_orig(:, :) = matrix(:, :)
+      
+      ALLOCATE (eigenvalues(n), eigenvectors(n, n), scaled_eigenvectors(n, n))
+      discarded_cnt = 0.0_dp
+      scaled_eigenvectors(:, :) = 0.0_dp
+
+      CALL diag_complex(0.5_dp*(matrix(:, :) + CONJG(TRANSPOSE(matrix(:, :)))), eigenvectors, eigenvalues)
+      IF (PRESENT(eigenvalues_out)) THEN
+         eigenvalues_out(:) = eigenvalues(:)
+      END IF
+      
+      DO i = 1, n
+         IF (ABS(eigenvalues(i)) > eps) THEN
+            scaled_eigenvectors(:, i) = eigenvectors(:, i) * eigenvalues(i)
+         ELSE
+            discarded_cnt = discarded_cnt + 1
+         END IF
+      END DO
+
+      ! CALL ZGEMM("N", "C", n, n, n, z_one, eigenvectors, n, eigenvectors, n, z_zero, matrix, n)
+      ! reconstruct filtered matrix: A_filtered = (V * eigenvalues) * V^H
+      CALL ZGEMM("N", "C", n, n, n, z_one, scaled_eigenvectors, n, eigenvectors, n, z_zero, matrix, n)
+      ! calculate Frobenius norm of the difference between input and modified matrix
+      matrix_diff_norm = SQRT(REAL(SUM(ABS(matrix(:, :) - matrix_orig(:, :))**2), KIND=dp))
+      
+      IF (PRESENT(print_discarded_count)) THEN
+         IF (print_discarded_count) THEN 
+            PRINT *, "Discarded ", discarded_cnt, " eigenvalues out of ", n
+            PRINT *, "Frobenius norm of matrix difference:", matrix_diff_norm
+         END IF
+      END IF 
+      
+      DEALLOCATE (eigenvalues, eigenvectors, scaled_eigenvectors, matrix_orig)
+      CALL timestop(handle)
+
+   END SUBROUTINE low_rank_filter
+
+! **************************************************************************************************
 !> \brief ...
 !> \param bs_env ...
 !> \param Sigma_c_n_time ...
@@ -3351,5 +3416,22 @@ CONTAINS
       CALL timestop(handle)
 
    END SUBROUTINE correct_obvious_fitting_fails
+
+   
+   SUBROUTINE write_reals_to_file(reals, filename)
+      REAL(KIND=dp), INTENT(in), DIMENSION(:)            :: reals
+      CHARACTER(LEN=*), INTENT(in)                       :: filename
+
+      INTEGER                                            :: iunit, i
+
+      CALL open_file(TRIM(filename), unit_number=iunit, file_status="REPLACE", file_action="WRITE")
+
+      DO i = 1, SIZE(reals)
+         WRITE(iunit, "(F20.10)") reals(i)
+      END DO
+
+      CALL close_file(iunit)
+
+   END SUBROUTINE write_reals_to_file
 
 END MODULE gw_utils

@@ -40,9 +40,14 @@ MODULE gw_small_cell_full_kp
                                               get_V_tr_R,&
                                               is_cell_in_index_to_cell,&
                                               power,&
-                                              time_to_freq
+                                              time_to_freq,&
+                                              write_reals_to_file,&
+                                              low_rank_filter
+   USE gw_lowrank_approx,               ONLY: calculate_W_lowrank_projector,&
+                                              W_storage_pipeline
    USE kinds,                           ONLY: dp,&
-                                              int_8
+                                              int_8,&
+                                              default_string_length
    USE kpoint_coulomb_2c,               ONLY: build_2c_coulomb_matrix_kp_small_cell
    USE kpoint_k_r_trafo_simple,         ONLY: add_kp_to_all_rs,&
                                               fm_add_kp_to_all_rs,&
@@ -572,12 +577,13 @@ CONTAINS
 
       CHARACTER(LEN=*), PARAMETER :: routineN = 'compute_W_real_space'
 
-      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: chi_k_w, eps_k_w, W_k_w
+      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: chi_k_w, eps_k_w, W_k_w, W_lowrank_training_sum
       COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)  :: M_inv, M_inv_V_sqrt, V_sqrt
       INTEGER                                            :: handle, i_t, ikp, ikp_local, j_w, n_RI, &
-                                                            nimages_scf_desymm
+                                                            nimages_scf_desymm, n_rank, i_img, nkp_local
       REAL(KIND=dp)                                      :: freq_j, t1, time_i, weight_ij
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: chi_R, MWM_R, W_R
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: chi_R, MWM_R, W_R, M_R, MWM_R_tmp
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: W_img, W_tmp, w_compressed,  W_lowrank_projector
 
       CALL timeset(routineN, handle)
 
@@ -588,8 +594,14 @@ CONTAINS
       ALLOCATE (chi_R(n_RI, n_RI, nimages_scf_desymm), W_R(n_RI, n_RI, nimages_scf_desymm), &
                 MWM_R(n_RI, n_RI, nimages_scf_desymm))
 
+      IF (bs_env%low_rank_approx_W_eps > 0.0_dp) THEN
+         ALLOCATE (W_lowrank_training_sum(n_RI, n_RI))
+         W_lowrank_training_sum(:, :) = z_zero
+      END IF
+
       t1 = m_walltime()
 
+      ! TODO ASK: why is M_inv calculated here? Too many kpoints, to reuse, right?
       CALL compute_Minv_and_Vsqrt(bs_env, qs_env, M_inv_V_sqrt, M_inv, V_sqrt)
 
       IF (bs_env%unit_nr > 0) THEN
@@ -658,17 +670,142 @@ CONTAINS
 
          ! 6. W^R(iω) -> W(iω,k) [k-mesh is not extrapolated for stable mult. with M^-1(k) ]
          !            -> M^-1(k)*W(iω,k)*M^-1(k) =: Ŵ(iω,k) -> Ŵ^R(iω) (stored in MWM_R)
-         CALL mult_W_with_Minv(W_R, MWM_R, bs_env, qs_env)
+         CALL mult_W_with_Minv(W_R, MWM_R, W_lowrank_training_sum, bs_env, qs_env)
 
-         ! 7. Ŵ^R(iω) -> Ŵ^R(iτ) and to fully distributed fm matrix bs_env%fm_MWM_R_t
-         DO i_t = 1, bs_env%num_time_freq_points
-            freq_j = bs_env%imag_freq_points(j_w)
-            time_i = bs_env%imag_time_points(i_t)
-            weight_ij = bs_env%weights_cos_w_to_t(i_t, j_w)*COS(time_i*freq_j)
-            CALL local_array_to_fm(MWM_R, bs_env%fm_MWM_R_t(:, i_t), weight_ij, add=.TRUE.)
-         END DO ! i_t
-
+         IF(bs_env%low_rank_approx_W_eps > 0.0_dp) THEN
+            ! Do a low rank approximation.
+            ! This requires a training matrix, so transform to time later.
+            ! Until then, store the W^R matrices. To be extra-safe, use files.
+            CALL W_storage_pipeline(bs_env, j_w, MWM_R, mode="write") ! TODO migrate to explicit store=.TRUE. argument?
+         ELSE 
+            ! Skip Low rank approx., directly transform to imaginary time
+            ! 7. Ŵ^R(iω) -> Ŵ^R(iτ) and to fully distributed fm matrix bs_env%fm_MWM_R_t
+            DO i_t = 1, bs_env%num_time_freq_points
+               freq_j = bs_env%imag_freq_points(j_w)
+               time_i = bs_env%imag_time_points(i_t)
+               weight_ij = bs_env%weights_cos_w_to_t(i_t, j_w)*COS(time_i*freq_j)
+               CALL local_array_to_fm(MWM_R, bs_env%fm_MWM_R_t(:, i_t), weight_ij, add=.TRUE.)
+            END DO ! i_t
+         END IF
       END DO ! j_w
+
+
+      ! if using LR approx: before calculating W^R(iτ), apply it.
+      IF (bs_env%low_rank_approx_W_eps > 0.0_dp) THEN
+         CALL bs_env%para_env%sync()
+         CALL bs_env%para_env%sum(W_lowrank_training_sum)
+         ! Ensure training_sum is hermitian
+         W_lowrank_training_sum(:, :) = 0.5_dp * (W_lowrank_training_sum(:,:) + CONJG(TRANSPOSE(W_lowrank_training_sum(:,:))))
+         
+         ! obtain low-rank projector L
+         CALL calculate_W_lowrank_projector(W_lowrank_training_sum, W_lowrank_projector, bs_env)
+
+
+         n_rank = SIZE(W_lowrank_projector, 2)
+         PRINT *, 'Low-rank W_eps: using rank = ', n_rank, ' out of ', n_RI
+
+         ALLOCATE(W_img(n_RI, n_RI), W_tmp(n_RI, n_rank))
+         ALLOCATE(w_compressed(n_rank, n_rank))
+
+         IF (ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) > 1.0E-8_dp) THEN
+            
+            nkp_local = 0
+            DO ikp = 1, bs_env%nkp_scf_desymm
+               ! trivial parallelization over k-points
+               IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
+               nkp_local = nkp_local + 1
+            END DO
+
+            ! Later, need to recalculate M_inv from M_R
+            DEALLOCATE(M_inv)
+            ALLOCATE(M_inv(n_RI, n_RI, nkp_local))
+            CALL get_V_tr_R(M_R, bs_env%ri_metric, bs_env%regularization_RI, bs_env, qs_env)
+            
+            ALLOCATE(MWM_R_tmp(n_RI, n_RI, nimages_scf_desymm))
+         END IF
+
+         DO j_w = 1, bs_env%num_time_freq_points
+            ! load MWM_R from disk
+            CALL W_storage_pipeline(bs_env, j_w, MWM_R, mode="read_and_delete") 
+            
+            DO i_img = 1, SIZE(MWM_R, 3)
+               
+               ! copy current image to matrix
+               W_img(:,:) = MWM_R(:,:,i_img)
+               
+               ! Step A: tmp = W * L ( n_RI x n_rank )
+               CALL DGEMM('N', 'N', n_RI, n_rank, n_RI, &
+                        1.0_dp, W_img, n_RI, W_lowrank_projector, n_RI, &
+                        0.0_dp, W_tmp, n_RI)
+
+               ! Step B: w = L^T * tmp ( n_rank x n_rank )
+               ! Note: MWM_R_compressed is (n_rank, n_rank, n_images)
+               CALL DGEMM('T', 'N', n_rank, n_rank, n_RI, &
+                        1.0_dp, W_lowrank_projector, n_RI, W_tmp, n_RI, &
+                        0.0_dp, w_compressed, n_rank)
+
+               ! For now, skip speedup tricks and directly reconstruct W from compressed form.
+               ! Compute W = L * w * L^T and copy back to MWM_R. Data is compressed, matrix size not yet. TODO!
+               ! Normally, store smaller R and handle missing M^a in 3c sum contraction (?)
+               CALL DGEMM('N', 'N', n_RI, n_rank, n_rank, &
+                        1.0_dp, W_lowrank_projector, n_RI, w_compressed, n_rank, &
+                        0.0_dp, W_tmp, n_RI) 
+               CALL DGEMM('N', 'T', n_RI, n_RI, n_rank, &
+                        1.0_dp, W_tmp, n_RI, W_lowrank_projector, n_RI, &
+                        0.0_dp, W_img, n_RI)
+               MWM_R(:,:,i_img) = W_img(:,:)
+            END DO
+
+            ! If the LR exponent a is not -1, we need to use M_inv^(-1-a) in k space and multiply the
+            ! missing power for M^-1 W(k) M^-1.
+            IF (ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) > 1.0E-8_dp) THEN
+               MWM_R_tmp(:, :, :) = 0.0_dp
+               ikp_local = 0
+               DO ikp = 1, bs_env%nkp_scf_desymm
+                  ! trivial parallelization
+                  IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
+                  ikp_local = ikp_local + 1
+
+                  ! M(k) = sum_R e^ikR M^R
+                  CALL rs_to_kp(M_R, M_inv(:, :, ikp_local), &
+                              bs_env%kpoints_scf_desymm%index_to_cell, &
+                              bs_env%kpoints_chi_eps_W%xkp(1:3, ikp))
+
+                  ! M^a W(k) M^a = FT(MWM_R)
+                  CALL rs_to_kp(MWM_R, W_k_w, &
+                     bs_env%kpoints_scf_desymm%index_to_cell, &
+                     bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
+
+                  ! M(k) = sum_R e^ikR M^R
+                  CALL rs_to_kp(M_R, M_inv(:, :, ikp_local), &
+                              bs_env%kpoints_scf_desymm%index_to_cell, &
+                              bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
+
+                  ! obtain M^(-1 - a)(k)
+                  CALL power(M_inv(:, :, ikp_local), -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
+
+                  ! W(k) = M^(-1 - a)(k) * W(k) * M^(-1 - a)(k)
+                  ! Abuse eps_k_w as temporary storage
+                  CALL gemm_square(M_inv(:, :, ikp_local), 'N', W_k_w, 'N', M_inv(:, :, ikp_local), 'N', eps_k_w)
+                  ! Back to real space
+                  CALL add_kp_to_all_rs(eps_k_w, MWM_R_tmp, bs_env%kpoints_scf_desymm, ikp)
+               END DO ! ikp
+               
+               CALL bs_env%para_env%sync()
+               CALL bs_env%para_env%sum(MWM_R_tmp)
+
+               MWM_R(:, :, :) = MWM_R_tmp(:, :, :)
+            END IF
+
+            ! 7. Ŵ^R(iω) -> Ŵ^R(iτ) and to fully distributed fm matrix bs_env%fm_MWM_R_t
+            DO i_t = 1, bs_env%num_time_freq_points
+               freq_j = bs_env%imag_freq_points(j_w)
+               time_i = bs_env%imag_time_points(i_t)
+               weight_ij = bs_env%weights_cos_w_to_t(i_t, j_w)*COS(time_i*freq_j)
+               CALL local_array_to_fm(MWM_R, bs_env%fm_MWM_R_t(:, i_t), weight_ij, add=.TRUE.)
+            END DO ! i_t
+         END DO ! j_w
+      END IF
 
       IF (bs_env%unit_nr > 0) THEN
          WRITE (bs_env%unit_nr, '(T2,A,T60,A,F7.1,A)') &
@@ -797,16 +934,17 @@ CONTAINS
 !> \param bs_env ...
 !> \param qs_env ...
 ! **************************************************************************************************
-   SUBROUTINE mult_W_with_Minv(W_R, MWM_R, bs_env, qs_env)
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: W_R, MWM_R
-      TYPE(post_scf_bandstructure_type), POINTER         :: bs_env
-      TYPE(qs_environment_type), POINTER                 :: qs_env
-
-      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'mult_W_with_Minv'
-
-      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: M_inv, W_k, work
-      INTEGER                                            :: handle, ikp, n_RI
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: M_R
+   SUBROUTINE mult_W_with_Minv(W_R, MWM_R, W_lowrank_training_sum, bs_env, qs_env)
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)             :: W_R, MWM_R
+      COMPLEX(KIND=dp), DIMENSION(:, :), INTENT(INOUT), OPTIONAL :: W_lowrank_training_sum
+      TYPE(post_scf_bandstructure_type), POINTER                 :: bs_env
+      TYPE(qs_environment_type), POINTER                         :: qs_env
+        
+      CHARACTER(LEN=*), PARAMETER                                :: routineN = 'mult_W_with_Minv'
+        
+      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)             :: M_inv, W_k, work
+      INTEGER                                                    :: handle, ikp, n_RI
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)             :: M_R
 
       CALL timeset(routineN, handle)
 
@@ -822,35 +960,55 @@ CONTAINS
          ! trivial parallelization
          IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
 
-         ! M(k) = sum_R e^ikR M^R
-         CALL rs_to_kp(M_R, M_inv, &
-                       bs_env%kpoints_scf_desymm%index_to_cell, &
-                       bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
-
-         ! invert M_PQ(k)
-         CALL power(M_inv, -1.0_dp, 0.0_dp)
-
          ! W(k) = sum_R e^ikR W^R [only R in the supercell that is determined by the SCF k-mesh]
          CALL rs_to_kp(W_R, W_k, &
                        bs_env%kpoints_scf_desymm%index_to_cell, &
                        bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
 
-         ! Ŵ(k) = M^-1(k)*W^trunc(k)*M^-1(k)
-         CALL gemm_square(M_inv, 'N', W_k, 'N', M_inv, 'N', work)
-         W_k(:, :) = work(:, :)
+         ! M(k) = sum_R e^ikR M^R
+         CALL rs_to_kp(M_R, M_inv, &
+                       bs_env%kpoints_scf_desymm%index_to_cell, &
+                       bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
+
+
+         IF(PRESENT(W_lowrank_training_sum)) THEN
+            ! use (M^a W M^a)^2 to train low-rank approx. projector L
+            ! low-rank approximation can e.g. be applied for M^0, M^-0.5, M^-1
+            IF(bs_env%low_rank_approx_M_exponent < 0.0_dp) THEN
+               CALL power(M_inv, bs_env%low_rank_approx_M_exponent, 0.0_dp)
+               CALL gemm_square(M_inv, 'N', W_k, 'N', M_inv, 'N', work)
+            ELSE
+               work(:, :) = W_k(:, :)
+            END IF
+
+            CALL gemm_square(work, 'N', work, 'N', W_k)
+            W_lowrank_training_sum(:, :) = W_lowrank_training_sum(:, :) + W_k * bs_env%kpoints_scf_desymm%wkp(ikp) ! TODO weight needed?
+            W_k(:, :) = work(:, :) ! TODO optimize later
+         ELSE
+            ! invert M_PQ(k)
+            CALL power(M_inv, -1.0_dp, 0.0_dp)
+            ! Ŵ(k) = M^-1(k)*W^trunc(k)*M^-1(k)
+            CALL gemm_square(M_inv, 'N', W_k, 'N', M_inv, 'N', work)
+            W_k(:, :) = work(:, :)
+         END IF
 
          ! Ŵ^R = sum_k w_k e^(-ikR) Ŵ^(k)
          CALL add_kp_to_all_rs(W_k, MWM_R, bs_env%kpoints_scf_desymm, ikp)
-
       END DO ! ikp
 
       CALL bs_env%para_env%sync()
       CALL bs_env%para_env%sum(MWM_R)
 
+      IF(ALLOCATED(M_R)) DEALLOCATE(M_R)
+      DEALLOCATE(M_inv)
+      DEALLOCATE(W_k)
+      DEALLOCATE(work)
+
       CALL timestop(handle)
 
    END SUBROUTINE mult_W_with_Minv
 
+   
 ! **************************************************************************************************
 !> \brief ...
 !> \param bs_env ...

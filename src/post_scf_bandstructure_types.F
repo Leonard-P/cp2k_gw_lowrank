@@ -152,6 +152,11 @@ MODULE post_scf_bandstructure_types
                                                       eps_eigval_mat_RI = -1.0_dp, &
                                                       input_regularization_RI = -1.0_dp, &
                                                       regularization_RI = -1.0_dp
+      
+      ! Low-Rank approximation threshold for W
+      REAL(KIND=dp)                                :: low_rank_approx_W_eps = -1.0_dp
+      ! Exponent for low-rank approximation of M(k)^exponent W(k) M(k)^exponent
+      REAL(KIND=dp)                                :: low_rank_approx_M_exponent = 0.0_dp
 
       ! global full cfm_1d used in GW
       TYPE(cp_fm_type)                             :: fm_s_Gamma = cp_fm_type(), &
