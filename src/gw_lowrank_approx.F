@@ -62,13 +62,25 @@ CONTAINS
       ALLOCATE(eigenvalues(n_RI), real_training_sum(n_RI, n_RI))
       real_training_sum(:, :) = REAL(training_sum, KIND=dp)
 
+      PRINT *, "Max asymmetry in training sum (should be close to zero): ", &
+         MAXVAL(ABS(real_training_sum - TRANSPOSE(real_training_sum)))
+
+      ! Ensure training_sum is hermitian
+      real_training_sum(:, :) = 0.5_dp * (real_training_sum(:,:) + TRANSPOSE(real_training_sum(:,:)))
+         
+
       ! eigenvalue decomposition of the training sum
       CALL diamat_all(real_training_sum, eigenvalues, dac=.TRUE.)
 
       real_part_norm_trainingsum = SUM(ABS(REAL(training_sum)))
       imag_part_norm_trainingsum = SUM(ABS(AIMAG(training_sum)))
-      PRINT *, "imaginary part of training sum (should be close to zero): ", imag_part_norm_trainingsum
-      PRINT *, "real part of training sum: ", real_part_norm_trainingsum
+
+      IF (bs_env%unit_nr > 0) THEN
+         WRITE (bs_env%unit_nr, *) &
+            "Imaginary part of training sum (should be close to zero): ", imag_part_norm_trainingsum
+         WRITE (bs_env%unit_nr, *) &
+            "Real part of training sum: ", real_part_norm_trainingsum
+      END IF
 
       IF (bs_env%para_env%mepos == bs_env%para_env%source) THEN
          CALL write_reals_to_file(eigenvalues, "eigenvalues_W_lowrank_training_sum.txt")
@@ -89,6 +101,8 @@ CONTAINS
             L(:, j) = REAL(real_training_sum(:, i))
          END IF
       END DO
+
+      PRINT *, "LT L - ID:", SUM(ABS(MATMUL(TRANSPOSE(L), L))) - count
 
       CALL timestop(handle)
 
@@ -116,7 +130,7 @@ CONTAINS
       INTEGER                                              :: unit_nr, iostat
       LOGICAL                                              :: is_master, file_exists
 
-      is_master = (bs_env%para_env%mepos == bs_env%para_env%source)
+      is_master = (bs_env%para_env%is_source())
       WRITE(filename, '(A,I3.3,A)') "W_realspace_freq_", freq_idx, ".dat"
 
       SELECT CASE (TRIM(mode))
@@ -143,23 +157,18 @@ CONTAINS
          
          ! Broadcast the large W_R to all cores
          CALL bs_env%para_env%bcast(MWM_R)
+
          IF (is_master) THEN
             CALL open_file(file_name=filename, unit_number=unit_nr, &
                            file_action="WRITE", file_form="UNFORMATTED", &
                            file_status="REPLACE")
             WRITE(unit_nr) MWM_R
             CALL close_file(unit_nr)
-
-            CALL bs_env%para_env%bcast(MWM_R)
-
-            
             ! Delete the file immediately after writing
             INQUIRE(FILE=filename, EXIST=file_exists)
             IF (file_exists) THEN
                OPEN(NEWUNIT=unit_nr, FILE=filename, STATUS='OLD', IOSTAT=iostat)
-               IF (iostat == 0) THEN
-                  CLOSE(unit_nr, STATUS='DELETE')
-               END IF
+               IF (iostat == 0) CLOSE(unit_nr, STATUS='DELETE')
             END IF
          END IF
 

@@ -577,10 +577,11 @@ CONTAINS
 
       CHARACTER(LEN=*), PARAMETER :: routineN = 'compute_W_real_space'
 
-      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: chi_k_w, eps_k_w, W_k_w, W_lowrank_training_sum
+      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: chi_k_w, eps_k_w, W_k_w, W_lowrank_training_sum,&
+                                                            M, zW_tmp, zW_compressed, W_projector_complex
       COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)  :: M_inv, M_inv_V_sqrt, V_sqrt
       INTEGER                                            :: handle, i_t, ikp, ikp_local, j_w, n_RI, &
-                                                            nimages_scf_desymm, n_rank, i_img, nkp_local
+                                                            nimages_scf_desymm, n_rank, i_img
       REAL(KIND=dp)                                      :: freq_j, t1, time_i, weight_ij
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: chi_R, MWM_R, W_R, M_R, MWM_R_tmp
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: W_img, W_tmp, w_compressed,  W_lowrank_projector
@@ -689,104 +690,122 @@ CONTAINS
          END IF
       END DO ! j_w
 
+      DEALLOCATE(M_inv)
+      DEALLOCATE(M_inv_V_sqrt, V_sqrt, chi_R, W_R)
+      DEALLOCATE(chi_k_w)
 
       ! if using LR approx: before calculating W^R(iτ), apply it.
       IF (bs_env%low_rank_approx_W_eps > 0.0_dp) THEN
          CALL bs_env%para_env%sync()
          CALL bs_env%para_env%sum(W_lowrank_training_sum)
-         ! Ensure training_sum is hermitian
-         W_lowrank_training_sum(:, :) = 0.5_dp * (W_lowrank_training_sum(:,:) + CONJG(TRANSPOSE(W_lowrank_training_sum(:,:))))
-         
+       
          ! obtain low-rank projector L
          CALL calculate_W_lowrank_projector(W_lowrank_training_sum, W_lowrank_projector, bs_env)
 
 
          n_rank = SIZE(W_lowrank_projector, 2)
-         PRINT *, 'Low-rank W_eps: using rank = ', n_rank, ' out of ', n_RI
+         IF (bs_env%unit_nr > 0) THEN
+            WRITE (bs_env%unit_nr, *) &
+               'Low-rank W_eps: using rank = ', n_rank, ' out of ', n_RI, 'with M(k)^', &
+               bs_env%low_rank_approx_M_exponent
+         END IF
 
          ALLOCATE(W_img(n_RI, n_RI), W_tmp(n_RI, n_rank))
          ALLOCATE(w_compressed(n_rank, n_rank))
-
-         IF (ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) > 1.0E-8_dp) THEN
-            
-            nkp_local = 0
-            DO ikp = 1, bs_env%nkp_scf_desymm
-               ! trivial parallelization over k-points
-               IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
-               nkp_local = nkp_local + 1
-            END DO
-
-            ! Later, need to recalculate M_inv from M_R
-            DEALLOCATE(M_inv)
-            ALLOCATE(M_inv(n_RI, n_RI, nkp_local))
+         
+         IF (ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) >= 1.0E-8_dp) THEN
             CALL get_V_tr_R(M_R, bs_env%ri_metric, bs_env%regularization_RI, bs_env, qs_env)
             
             ALLOCATE(MWM_R_tmp(n_RI, n_RI, nimages_scf_desymm))
+            ALLOCATE(M(n_RI, n_RI))
+            ALLOCATE(zW_tmp(n_RI, n_rank), zW_compressed(n_rank, n_rank), W_projector_complex(n_RI, n_rank))
+            W_projector_complex(:, :) = CMPLX(W_lowrank_projector(:, :), 0.0_dp, KIND=dp)
          END IF
 
          DO j_w = 1, bs_env%num_time_freq_points
             ! load MWM_R from disk
             CALL W_storage_pipeline(bs_env, j_w, MWM_R, mode="read_and_delete") 
+
+            IF (ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) < 1.0E-8_dp) THEN
             
-            DO i_img = 1, SIZE(MWM_R, 3)
-               
-               ! copy current image to matrix
-               W_img(:,:) = MWM_R(:,:,i_img)
-               
-               ! Step A: tmp = W * L ( n_RI x n_rank )
-               CALL DGEMM('N', 'N', n_RI, n_rank, n_RI, &
-                        1.0_dp, W_img, n_RI, W_lowrank_projector, n_RI, &
-                        0.0_dp, W_tmp, n_RI)
+               DO i_img = 1, SIZE(MWM_R, 3) 
+                  ! copy current image to matrix
+                  W_img(:,:) = MWM_R(:,:,i_img)
+                  
+                  ! Step A: tmp = W * L ( n_RI x n_rank )
+                  CALL DGEMM('N', 'N', n_RI, n_rank, n_RI, &
+                           1.0_dp, W_img, n_RI, W_lowrank_projector, n_RI, &
+                           0.0_dp, W_tmp, n_RI)
 
-               ! Step B: w = L^T * tmp ( n_rank x n_rank )
-               ! Note: MWM_R_compressed is (n_rank, n_rank, n_images)
-               CALL DGEMM('T', 'N', n_rank, n_rank, n_RI, &
-                        1.0_dp, W_lowrank_projector, n_RI, W_tmp, n_RI, &
-                        0.0_dp, w_compressed, n_rank)
+                  ! Step B: w = L^T * tmp ( n_rank x n_rank )
+                  ! Note: MWM_R_compressed is (n_rank, n_rank, n_images)
+                  CALL DGEMM('T', 'N', n_rank, n_rank, n_RI, &
+                           1.0_dp, W_lowrank_projector, n_RI, W_tmp, n_RI, &
+                           0.0_dp, w_compressed, n_rank)
 
-               ! For now, skip speedup tricks and directly reconstruct W from compressed form.
-               ! Compute W = L * w * L^T and copy back to MWM_R. Data is compressed, matrix size not yet. TODO!
-               ! Normally, store smaller R and handle missing M^a in 3c sum contraction (?)
-               CALL DGEMM('N', 'N', n_RI, n_rank, n_rank, &
-                        1.0_dp, W_lowrank_projector, n_RI, w_compressed, n_rank, &
-                        0.0_dp, W_tmp, n_RI) 
-               CALL DGEMM('N', 'T', n_RI, n_RI, n_rank, &
-                        1.0_dp, W_tmp, n_RI, W_lowrank_projector, n_RI, &
-                        0.0_dp, W_img, n_RI)
-               MWM_R(:,:,i_img) = W_img(:,:)
-            END DO
+                  ! For now, skip speedup tricks and directly reconstruct W from compressed form.
+                  ! Compute W = L * w * L^T and copy back to MWM_R.
+                  CALL DGEMM('N', 'N', n_RI, n_rank, n_rank, &
+                           1.0_dp, W_lowrank_projector, n_RI, w_compressed, n_rank, &
+                           0.0_dp, W_tmp, n_RI) 
+                  CALL DGEMM('N', 'T', n_RI, n_RI, n_rank, &
+                           1.0_dp, W_tmp, n_RI, W_lowrank_projector, n_RI, &
+                           0.0_dp, W_img, n_RI)
+                  MWM_R(:,:,i_img) = W_img(:,:)
+               END DO
 
             ! If the LR exponent a is not -1, we need to use M_inv^(-1-a) in k space and multiply the
             ! missing power for M^-1 W(k) M^-1.
-            IF (ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) > 1.0E-8_dp) THEN
+            ELSE
                MWM_R_tmp(:, :, :) = 0.0_dp
-               ikp_local = 0
                DO ikp = 1, bs_env%nkp_scf_desymm
                   ! trivial parallelization
                   IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
-                  ikp_local = ikp_local + 1
-
-                  ! M(k) = sum_R e^ikR M^R
-                  CALL rs_to_kp(M_R, M_inv(:, :, ikp_local), &
-                              bs_env%kpoints_scf_desymm%index_to_cell, &
-                              bs_env%kpoints_chi_eps_W%xkp(1:3, ikp))
 
                   ! M^a W(k) M^a = FT(MWM_R)
                   CALL rs_to_kp(MWM_R, W_k_w, &
                      bs_env%kpoints_scf_desymm%index_to_cell, &
                      bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
 
+                  ! Lowrank compression as above.
+                  ! Calculate W_lowrank_projector^T * W_k_w * W_lowrank_projector
+                  ! and project up with
+                  ! W_k_w ~ W_lowrank_projector * w_compressed * W_lowrank_projector^T
+                  ! Step A: tmp = W_k_w * L ( n_RI x n_rank )
+                  CALL ZGEMM('N', 'N', n_RI, n_rank, n_RI, &
+                           z_one, W_k_w, n_RI, W_projector_complex, n_RI, &
+                           z_zero, zW_tmp, n_RI)
+                  ! Step B: w = L^T * tmp ( n_rank x n_rank )
+                  CALL ZGEMM('T', 'N', n_rank, n_rank, n_RI, &
+                           z_one, W_projector_complex, n_RI, zW_tmp, n_RI, &
+                           z_zero, zW_compressed, n_rank)
+                  ! Reconstruct W_k_w = L * w_compressed * L^T
+                  CALL ZGEMM('N', 'N', n_RI, n_rank, n_rank, &
+                           z_one, W_projector_complex, n_RI, zW_compressed, n_rank, &
+                           z_zero, zW_tmp, n_RI) 
+                  CALL ZGEMM('N', 'T', n_RI, n_RI, n_rank, &
+                           z_one, zW_tmp, n_RI, W_projector_complex, n_RI, &
+                           z_zero, W_k_w, n_RI)
+                  
+
                   ! M(k) = sum_R e^ikR M^R
-                  CALL rs_to_kp(M_R, M_inv(:, :, ikp_local), &
+                  CALL rs_to_kp(M_R, M, &
                               bs_env%kpoints_scf_desymm%index_to_cell, &
                               bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
 
                   ! obtain M^(-1 - a)(k)
-                  CALL power(M_inv(:, :, ikp_local), -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
+                  CALL power(M, -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
+
+                  ! Debug test
+                  !CALL power(M, 0.5_dp * (-1.0_dp - bs_env%low_rank_approx_M_exponent), 1.0E-6_dp)
+                  !CALL gemm_square(M, 'N', M, 'N', eps_k_w)
+                  !M(:, :) = eps_k_w(:, :)
+
 
                   ! W(k) = M^(-1 - a)(k) * W(k) * M^(-1 - a)(k)
                   ! Abuse eps_k_w as temporary storage
-                  CALL gemm_square(M_inv(:, :, ikp_local), 'N', W_k_w, 'N', M_inv(:, :, ikp_local), 'N', eps_k_w)
+                  CALL gemm_square(M, 'N', W_k_w, 'N', M, 'N', eps_k_w)
+
                   ! Back to real space
                   CALL add_kp_to_all_rs(eps_k_w, MWM_R_tmp, bs_env%kpoints_scf_desymm, ikp)
                END DO ! ikp
@@ -975,7 +994,7 @@ CONTAINS
             ! use (M^a W M^a)^2 to train low-rank approx. projector L
             ! low-rank approximation can e.g. be applied for M^0, M^-0.5, M^-1
             IF(bs_env%low_rank_approx_M_exponent < 0.0_dp) THEN
-               CALL power(M_inv, bs_env%low_rank_approx_M_exponent, 0.0_dp)
+               CALL power(M_inv, bs_env%low_rank_approx_M_exponent, 1.0E-6_dp)
                CALL gemm_square(M_inv, 'N', W_k, 'N', M_inv, 'N', work)
             ELSE
                work(:, :) = W_k(:, :)
