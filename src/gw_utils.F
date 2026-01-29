@@ -138,7 +138,7 @@ MODULE gw_utils
    PUBLIC :: create_and_init_bs_env_for_gw, de_init_bs_env, get_i_j_atoms, &
              compute_xkp, time_to_freq, analyt_conti_and_print, &
              add_R, is_cell_in_index_to_cell, get_V_tr_R, power, write_reals_to_file, &
-             low_rank_filter
+             low_rank_filter, write_matrix_to_file
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_utils'
 
@@ -3433,5 +3433,29 @@ CONTAINS
       CALL close_file(iunit)
 
    END SUBROUTINE write_reals_to_file
+
+
+   SUBROUTINE write_matrix_to_file(matrix, filename)
+      REAL(KIND=dp), INTENT(in), DIMENSION(:, :)         :: matrix
+      CHARACTER(LEN=*), INTENT(in)                       :: filename
+
+      INTEGER                                            :: iunit, i, j, cols
+      CHARACTER(LEN=100)                                 :: fmt_str
+
+      cols = SIZE(matrix, 2)
+      
+      CALL open_file(TRIM(filename), unit_number=iunit, file_status="REPLACE", file_action="WRITE")
+
+      ! Create a format string that adapts to the number of columns, e.g., "(10ES24.16)"
+      ! Using ES24.16 preserves double precision for numpy analysis.
+      WRITE(fmt_str, '(A,I0,A)') "(", cols, "ES24.16)"
+
+      DO i = 1, SIZE(matrix, 1)
+         WRITE(iunit, FMT=TRIM(fmt_str)) (matrix(i, j), j=1, cols)
+      END DO
+
+      CALL close_file(iunit)
+
+   END SUBROUTINE write_matrix_to_file
 
 END MODULE gw_utils

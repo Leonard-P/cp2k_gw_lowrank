@@ -62,8 +62,10 @@ CONTAINS
       ALLOCATE(eigenvalues(n_RI), real_training_sum(n_RI, n_RI))
       real_training_sum(:, :) = REAL(training_sum, KIND=dp)
 
-      PRINT *, "Max asymmetry in training sum (should be close to zero): ", &
-         MAXVAL(ABS(real_training_sum - TRANSPOSE(real_training_sum)))
+      IF (bs_env%unit_nr > 0) THEN
+         PRINT *, "Max asymmetry in training sum (should be close to zero): ", &
+            MAXVAL(ABS(real_training_sum - TRANSPOSE(real_training_sum)))
+      END IF
 
       ! Ensure training_sum is hermitian
       real_training_sum(:, :) = 0.5_dp * (real_training_sum(:,:) + TRANSPOSE(real_training_sum(:,:)))
@@ -102,7 +104,13 @@ CONTAINS
          END IF
       END DO
 
-      PRINT *, "LT L - ID:", SUM(ABS(MATMUL(TRANSPOSE(L), L))) - count
+      ! PRINT *, "LT L - ID:", SUM(ABS(MATMUL(TRANSPOSE(L), L))) - count
+
+      IF (bs_env%unit_nr > 0) THEN
+         WRITE (bs_env%unit_nr, *) &
+            'Low-rank basis for W: using rank = ', count, ' out of ', n_RI, &
+            'with M(k)^', bs_env%low_rank_approx_M_exponent
+      END IF
 
       CALL timestop(handle)
 
@@ -114,16 +122,16 @@ CONTAINS
 !> \brief Pipeline for storing/retrieving Real-Space Interaction W^R data
 !> \param bs_env The bandstructure environment
 !> \param freq_idx The index of the current frequency point (used for filename)
-!> \param MWM_R The Input/Output large real-space matrix (n_RI x n_RI x n_images)
+!> \param W_k The Input/Output large real-space matrix (n_RI x n_RI x n_images)
 !> \param mode Action to perform: "write", "read", or "read_and_delete"
-!>             - "write": Save MWM_R to disk (training phase)
-!>             - "read": Load MWM_R from disk and broadcast
-!>             - "read_and_delete": read MWM_R and delete the file
+!>             - "write": Save W_k to disk (training phase)
+!>             - "read": Load W_k from disk and broadcast
+!>             - "read_and_delete": read W_k and delete the file
 ! **************************************************************************************************
-   SUBROUTINE W_storage_pipeline(bs_env, freq_idx, MWM_R, mode)
+   SUBROUTINE W_storage_pipeline(bs_env, freq_idx, W_k, mode)
       TYPE(post_scf_bandstructure_type), POINTER           :: bs_env
       INTEGER, INTENT(IN)                                  :: freq_idx
-      REAL(KIND=dp), DIMENSION(:, :, :), INTENT(INOUT)     :: MWM_R
+      COMPLEX(KIND=dp), DIMENSION(:, :, :), INTENT(INOUT)  :: W_k
       CHARACTER(LEN=*), INTENT(IN)                         :: mode
 
       CHARACTER(LEN=default_string_length)                 :: filename
@@ -140,7 +148,7 @@ CONTAINS
             CALL open_file(file_name=filename, unit_number=unit_nr, &
                            file_action="WRITE", file_form="UNFORMATTED", &
                            file_status="REPLACE")
-            WRITE(unit_nr) MWM_R
+            WRITE(unit_nr) W_k
             CALL close_file(unit_nr)
          END IF
          CALL bs_env%para_env%sync()
@@ -151,19 +159,14 @@ CONTAINS
             CALL open_file(file_name=filename, unit_number=unit_nr, &
                            file_action="READ", file_form="UNFORMATTED", &
                            file_status="OLD")
-            READ(unit_nr) MWM_R
+            READ(unit_nr) W_k
             CALL close_file(unit_nr)
          END IF
          
          ! Broadcast the large W_R to all cores
-         CALL bs_env%para_env%bcast(MWM_R)
+         CALL bs_env%para_env%bcast(W_k)
 
          IF (is_master) THEN
-            CALL open_file(file_name=filename, unit_number=unit_nr, &
-                           file_action="WRITE", file_form="UNFORMATTED", &
-                           file_status="REPLACE")
-            WRITE(unit_nr) MWM_R
-            CALL close_file(unit_nr)
             ! Delete the file immediately after writing
             INQUIRE(FILE=filename, EXIST=file_exists)
             IF (file_exists) THEN
@@ -180,12 +183,12 @@ CONTAINS
             CALL open_file(file_name=filename, unit_number=unit_nr, &
                            file_action="READ", file_form="UNFORMATTED", &
                            file_status="OLD")
-            READ(unit_nr) MWM_R
+            READ(unit_nr) W_k
             CALL close_file(unit_nr)
          END IF
          
          ! Broadcast the large W_R to all cores
-         CALL bs_env%para_env%bcast(MWM_R)
+         CALL bs_env%para_env%bcast(W_k)
 
       CASE DEFAULT
          CPABORT("Invalid mode for W_storage_pipeline. Use 'write', 'read', or 'read_and_delete'.")
