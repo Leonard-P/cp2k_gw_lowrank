@@ -586,6 +586,8 @@ CONTAINS
       REAL(KIND=dp)                                      :: freq_j, t1, time_i, weight_ij
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: chi_R, W_R, M_R, MWM_R
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: W_lowrank_projector, W_projector_up_down
+      LOGICAL, PARAMETER                                 :: apply_lowrank_approx_to_full_MWM = .FALSE.,&
+                                                            debug_use_id_instead_of_projector = .FALSE.
 
       CALL timeset(routineN, handle)
 
@@ -705,6 +707,12 @@ CONTAINS
             ! CALL write_matrix_to_file(W_projector_up_down, 'W_lowrank_projector_updown.txt')
          END IF
 
+         ! For debugging: exchange LL^T with identity
+         IF (debug_use_id_instead_of_projector) THEN
+            W_projector_up_down_cmplx(:, :) = z_zero
+            CALL add_on_diag(W_projector_up_down_cmplx, z_one)
+         END IF
+
          IF (ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) >= 1.0E-12_dp) THEN
             CALL get_V_tr_R(M_R, bs_env%ri_metric, bs_env%regularization_RI, bs_env, qs_env)
             ALLOCATE(M(n_RI, n_RI))
@@ -733,20 +741,38 @@ CONTAINS
             ikp_local = ikp_local + 1
             
             IF (bs_env%low_rank_approx_W_eps > 0.0_dp) THEN
-               ! apply LR approx to W_k(:,:,ikp): W_k -> LL^T W_k LL^T
-               CALL gemm_square(W_projector_up_down_cmplx, 'N', W_k_local(:, :, ikp_local), 'N', W_projector_up_down_cmplx,&
-                               'N', W_k_tmp)
-
-               ! if needed, multiply missing power of M^-1-a on both sides
-               IF (ABS(bs_env%low_rank_approx_M_exponent +1.0_dp) >= 1.0E-12_dp) THEN
-                  ! M(k) = sum_R e^ikR M^R
-                  CALL rs_to_kp(M_R, M, &
-                              bs_env%kpoints_scf_desymm%index_to_cell, &
-                              bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
-                  CALL power(M, -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
-                  CALL gemm_square(M, 'N', W_k_tmp, 'N', M, 'N', W_k_local(:, :, ikp_local))
+               IF (apply_lowrank_approx_to_full_MWM) THEN
+                  ! apply LR approx via LL^T M^-1 W M^-1 LL^T
+                  IF (ABS(bs_env%low_rank_approx_M_exponent +1.0_dp) >= 1.0E-12_dp) THEN
+                     ! M(k) = sum_R e^ikR M^R
+                     CALL rs_to_kp(M_R, M, &
+                                 bs_env%kpoints_scf_desymm%index_to_cell, &
+                                 bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
+                     CALL power(M, -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
+                     CALL gemm_square(M, 'N', W_k_local(:, :, ikp_local), 'N', M, 'N', W_k_tmp)
+                  ELSE
+                     W_k_tmp(:, :) = W_k_local(:, :, ikp_local)
+                  END IF
+                  
+                  CALL gemm_square(W_projector_up_down_cmplx, 'N', W_k_tmp, 'N', W_projector_up_down_cmplx,&
+                                   'N', W_k_local(:, :, ikp_local))
                ELSE
-                  W_k_local(:, :, ikp_local) = W_k_tmp(:, :)
+                  ! apply LR approx via M^b LL^T M^a W M^a LL^T M^b
+                  ! apply LR approx to W_k(:,:,ikp): W_k -> LL^T W_k LL^T
+                  CALL gemm_square(W_projector_up_down_cmplx, 'N', W_k_local(:, :, ikp_local), 'N', W_projector_up_down_cmplx,&
+                                 'N', W_k_tmp)
+
+                  ! if needed, multiply missing power of M^-1-a on both sides
+                  IF (ABS(bs_env%low_rank_approx_M_exponent +1.0_dp) >= 1.0E-12_dp) THEN
+                     ! M(k) = sum_R e^ikR M^R
+                     CALL rs_to_kp(M_R, M, &
+                                 bs_env%kpoints_scf_desymm%index_to_cell, &
+                                 bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
+                     CALL power(M, -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
+                     CALL gemm_square(M, 'N', W_k_tmp, 'N', M, 'N', W_k_local(:, :, ikp_local))
+                  ELSE
+                     W_k_local(:, :, ikp_local) = W_k_tmp(:, :)
+                  END IF
                END IF
             END IF
 
