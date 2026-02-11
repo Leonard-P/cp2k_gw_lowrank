@@ -579,7 +579,7 @@ CONTAINS
       CHARACTER(LEN=*), PARAMETER :: routineN = 'compute_W_real_space'
 
       COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: chi_k_w, eps_k_w, W_k_w, W_lowrank_training_sum,&
-                                                            M, W_k_tmp, W_projector_up_down_cmplx
+                                                            M, W_k_tmp, W_projector_up_down_cmplx, M_avg, M_avg_inv
       COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)  :: M_inv, M_inv_V_sqrt, V_sqrt, W_k, W_k_local
       INTEGER                                            :: handle, i_t, ikp, ikp_local, j_w, n_RI, &
                                                             nimages_scf_desymm, n_rank
@@ -587,7 +587,7 @@ CONTAINS
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: chi_R, W_R, M_R, MWM_R
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: W_lowrank_projector, W_projector_up_down
       LOGICAL, PARAMETER                                 :: apply_lowrank_approx_to_full_MWM = .FALSE.,&
-                                                            debug_use_id_instead_of_projector = .FALSE.
+                                                            debug_use_Mavg_conditioner = .TRUE.
 
       CALL timeset(routineN, handle)
 
@@ -707,13 +707,7 @@ CONTAINS
             ! CALL write_matrix_to_file(W_projector_up_down, 'W_lowrank_projector_updown.txt')
          END IF
 
-         ! For debugging: exchange LL^T with identity
-         IF (debug_use_id_instead_of_projector) THEN
-            W_projector_up_down_cmplx(:, :) = z_zero
-            CALL add_on_diag(W_projector_up_down_cmplx, z_one)
-         END IF
-
-         IF (ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) >= 1.0E-12_dp) THEN
+         IF (debug_use_Mavg_conditioner .OR. ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) >= 1.0E-12_dp) THEN
             CALL get_V_tr_R(M_R, bs_env%ri_metric, bs_env%regularization_RI, bs_env, qs_env)
             ALLOCATE(M(n_RI, n_RI))
          END IF
@@ -734,6 +728,30 @@ CONTAINS
          DEALLOCATE(W_k)
          ALLOCATE(MWM_R(n_RI, n_RI, nimages_scf_desymm))
          MWM_R(:, :, :) = 0.0_dp
+
+         IF (debug_use_Mavg_conditioner) THEN 
+            IF(.NOT. ALLOCATED(M_avg)) ALLOCATE(M_avg(n_RI, n_RI), M_avg_inv(n_RI, n_RI))
+            IF (.NOT. ALLOCATED(M)) ALLOCATE(M(n_RI, n_RI))
+            M_avg = z_zero
+            
+            ikp_local = 0
+            DO ikp = 1, bs_env%nkp_scf_desymm
+               IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
+               ikp_local = ikp_local + 1
+               
+               ! M(k) = sum_R e^ikR M^R
+               CALL rs_to_kp(M_R, M, &
+                           bs_env%kpoints_scf_desymm%index_to_cell, &
+                           bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
+               
+               M_avg(:, :) = M_avg(:, :) + M(:, :) * bs_env%kpoints_scf_desymm%wkp(ikp)
+            END DO
+
+            CALL bs_env%para_env%sum(M_avg)
+
+            M_avg_inv(:, :) = M_avg(:, :)
+            CALL power(M_avg_inv, -1.0_dp, 0.0_dp)
+         END IF
 
          ikp_local = 0
          DO ikp = 1, bs_env%nkp_scf_desymm
@@ -756,6 +774,29 @@ CONTAINS
                   
                   CALL gemm_square(W_projector_up_down_cmplx, 'N', W_k_tmp, 'N', W_projector_up_down_cmplx,&
                                    'N', W_k_local(:, :, ikp_local))
+               ELSE IF (debug_use_Mavg_conditioner) THEN
+
+                  ! apply LR approx via LL^T M_avg M^-1 W M^-1 M_avg LL^T
+                  IF (ABS(bs_env%low_rank_approx_M_exponent +1.0_dp) >= 1.0E-12_dp) THEN
+                     ! M(k) = sum_R e^ikR M^R
+                     CALL rs_to_kp(M_R, M, &
+                                 bs_env%kpoints_scf_desymm%index_to_cell, &
+                                 bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
+                     CALL power(M, -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
+                     CALL gemm_square(M, 'N', W_k_local(:, :, ikp_local), 'N', M, 'N', W_k_tmp)
+                  ELSE
+                     W_k_tmp(:, :) = W_k_local(:, :, ikp_local)
+                  END IF
+
+                  ! precondition with M_avg
+                  CALL gemm_square(M_avg, 'N', W_k_tmp, 'N', M_avg, 'N', W_k_local(:, :, ikp_local))
+                  
+                  CALL gemm_square(W_projector_up_down_cmplx, 'N', W_k_local(:, :, ikp_local), 'N', W_projector_up_down_cmplx,&
+                                   'N', W_k_tmp)
+
+                  ! Remove preconditioning with M_avg^-1
+                  CALL gemm_square(M_avg_inv, 'N', W_k_tmp, 'N', M_avg_inv, 'N', W_k_local(:, :, ikp_local))
+                 
                ELSE
                   ! apply LR approx via M^b LL^T M^a W M^a LL^T M^b
                   ! apply LR approx to W_k(:,:,ikp): W_k -> LL^T W_k LL^T
