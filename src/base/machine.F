@@ -88,7 +88,7 @@ MODULE machine
 
    PUBLIC :: m_walltime, m_timestamp, m_hostnm, m_flush, &
              m_getcwd, m_getlog, m_getpid, m_procrun, m_abort, &
-             m_chdir, m_mov, m_memory, m_memory_details, m_energy, &
+             m_chdir, m_mkdir, m_mov, m_memory, m_memory_details, m_energy, &
              m_cpuinfo, m_cpuid_static, m_cpuid, m_cpuid_name, &
              m_cpuid_vlen, m_omp_get_stacksize, m_omp_trace_issues
 
@@ -668,6 +668,28 @@ CONTAINS
 
       ierror = chdir(TRIM(dir)//c_null_char)
    END SUBROUTINE m_chdir
+
+! **************************************************************************************************
+!> \brief Create a directory. Silently ignores errors (e.g. directory already exists).
+!> \param dir Path of the directory to create
+!> \param ierror 0 on success, nonzero on failure
+! **************************************************************************************************
+   SUBROUTINE m_mkdir(dir, ierror)
+      CHARACTER(len=*), INTENT(IN)             :: dir
+      INTEGER, INTENT(OUT)                     :: ierror
+
+      INTERFACE
+         FUNCTION mkdir(path, mode) BIND(C, name="mkdir") RESULT(errno)
+            IMPORT
+            CHARACTER(KIND=C_CHAR), DIMENSION(*)     :: path
+            INTEGER(KIND=C_INT), VALUE               :: mode
+            INTEGER(KIND=C_INT)                      :: errno
+         END FUNCTION mkdir
+      END INTERFACE
+
+      ! mode 0755 = rwxr-xr-x in octal
+      ierror = mkdir(TRIM(dir)//c_null_char, INT(O'755', C_INT))
+   END SUBROUTINE m_mkdir
 
 ! **************************************************************************************************
 !> \brief ...
