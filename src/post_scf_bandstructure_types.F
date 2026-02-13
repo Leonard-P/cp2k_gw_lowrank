@@ -155,6 +155,7 @@ MODULE post_scf_bandstructure_types
       
       ! Low-Rank approximation threshold for W
       REAL(KIND=dp)                                :: low_rank_approx_W_eps = -1.0_dp
+      INTEGER                                      :: low_rank_approx_W_rank = -1
       ! Exponent for low-rank approximation of M(k)^exponent W(k) M(k)^exponent
       REAL(KIND=dp)                                :: low_rank_approx_M_exponent = 0.0_dp
 

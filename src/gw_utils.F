@@ -138,7 +138,7 @@ MODULE gw_utils
    PUBLIC :: create_and_init_bs_env_for_gw, de_init_bs_env, get_i_j_atoms, &
              compute_xkp, time_to_freq, analyt_conti_and_print, &
              add_R, is_cell_in_index_to_cell, get_V_tr_R, power, write_reals_to_file, &
-             low_rank_filter, write_matrix_to_file
+             low_rank_filter, write_real_matrix_to_file, write_complex_matrix_to_file
 
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_utils'
 
@@ -293,6 +293,7 @@ CONTAINS
       CALL section_vals_val_get(gw_sec, "FREQ_MAX_FIT", r_val=bs_env%freq_max_fit)
       CALL section_vals_val_get(gw_sec, "LOW_RANK_APPROX_W_EPS", r_val=bs_env%low_rank_approx_W_eps)
       CALL section_vals_val_get(gw_sec, "LOW_RANK_APPROX_M_EXPONENT", r_val=bs_env%low_rank_approx_M_exponent)
+      CALL section_vals_val_get(gw_sec, "LOW_RANK_APPROX_W_RANK", i_val=bs_env%low_rank_approx_W_rank)
 
       CALL timestop(handle)
 
@@ -3435,7 +3436,7 @@ CONTAINS
    END SUBROUTINE write_reals_to_file
 
 
-   SUBROUTINE write_matrix_to_file(matrix, filename)
+   SUBROUTINE write_real_matrix_to_file(matrix, filename)
       REAL(KIND=dp), INTENT(in), DIMENSION(:, :)         :: matrix
       CHARACTER(LEN=*), INTENT(in)                       :: filename
 
@@ -3456,6 +3457,29 @@ CONTAINS
 
       CALL close_file(iunit)
 
-   END SUBROUTINE write_matrix_to_file
+   END SUBROUTINE write_real_matrix_to_file
+
+   SUBROUTINE write_complex_matrix_to_file(matrix, filename)
+      COMPLEX(KIND=dp), INTENT(in), DIMENSION(:, :)      :: matrix
+      CHARACTER(LEN=*), INTENT(in)                       :: filename
+
+      INTEGER                                            :: iunit, i, j, cols, num_floats
+      CHARACTER(LEN=100)                                 :: fmt_str
+
+      cols = SIZE(matrix, 2)
+      num_floats = cols * 2
+      
+      CALL open_file(TRIM(filename), unit_number=iunit, file_status="REPLACE", file_action="WRITE")
+
+      ! Write real and imaginary parts -> 2 * cols entries per row
+      WRITE(fmt_str, '(A,I0,A)') "(", num_floats, "ES24.16)"
+
+      DO i = 1, SIZE(matrix, 1)
+         WRITE(iunit, FMT=TRIM(fmt_str)) (REAL(matrix(i, j), KIND=dp), AIMAG(matrix(i, j)), j=1, cols)
+      END DO
+
+      CALL close_file(iunit)
+
+   END SUBROUTINE write_complex_matrix_to_file
 
 END MODULE gw_utils

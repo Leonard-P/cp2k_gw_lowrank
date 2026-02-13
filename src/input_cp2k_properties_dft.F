@@ -2309,6 +2309,15 @@ CONTAINS
       CALL section_add_keyword(section, keyword)
       CALL keyword_release(keyword)
 
+      CALL keyword_create(keyword, __LOCATION__, name="LOW_RANK_APPROX_W_RANK", &
+                          description="Compress all W(k) matrices to the given fixed rank."// &
+                           "Values from 1 to # of RI basis functions are allowed."// &
+                           "Cannot be given if LOW_RANK_APPROX_W_EPS is given.", &
+                          usage="LOW_RANK_APPROX_W_RANK 75", &
+                          default_i_val=-1, type_of_var=integer_t) 
+      CALL section_add_keyword(section, keyword)
+      CALL keyword_release(keyword)
+      
       CALL keyword_create(keyword, __LOCATION__, name="MEMORY_PER_PROC", &
                           description="Specify the available memory per MPI process. Set "// &
                           "`MEMORY_PER_PROC` as accurately as possible for good performance. If "// &

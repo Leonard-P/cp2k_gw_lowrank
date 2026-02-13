@@ -40,12 +40,10 @@ MODULE gw_small_cell_full_kp
                                               get_V_tr_R,&
                                               is_cell_in_index_to_cell,&
                                               power,&
-                                              time_to_freq,&
-                                              write_reals_to_file,&
-                                              low_rank_filter,&
-                                              write_matrix_to_file
+                                              time_to_freq
    USE gw_lowrank_approx,               ONLY: calculate_W_lowrank_projector,&
-                                              W_storage_pipeline
+                                              W_storage_pipeline,&
+                                              bs_env_do_LR
    USE kinds,                           ONLY: dp,&
                                               int_8,&
                                               default_string_length
@@ -578,16 +576,14 @@ CONTAINS
 
       CHARACTER(LEN=*), PARAMETER :: routineN = 'compute_W_real_space'
 
-      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: chi_k_w, eps_k_w, W_k_w, W_lowrank_training_sum,&
-                                                            M, W_k_tmp, W_projector_up_down_cmplx
-      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)  :: M_inv, M_inv_V_sqrt, V_sqrt, W_k, W_k_local
+      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: chi_k_w, eps_k_w, W_k_w, M, W_k_tmp, &
+                                                            W_lowrank_projector, W_projector_up_down
+      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)  :: M_inv, M_inv_V_sqrt, V_sqrt, W_k, W_k_local, &
+                                                            W_lowrank_training_sums
       INTEGER                                            :: handle, i_t, ikp, ikp_local, j_w, n_RI, &
                                                             nimages_scf_desymm, n_rank
       REAL(KIND=dp)                                      :: freq_j, t1, time_i, weight_ij
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: chi_R, W_R, M_R, MWM_R
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)        :: W_lowrank_projector, W_projector_up_down
-      LOGICAL, PARAMETER                                 :: apply_lowrank_approx_to_full_MWM = .FALSE.,&
-                                                            debug_use_id_instead_of_projector = .FALSE.
 
       CALL timeset(routineN, handle)
 
@@ -597,9 +593,14 @@ CONTAINS
       ALLOCATE (chi_k_w(n_RI, n_RI), eps_k_w(n_RI, n_RI), W_k_w(n_RI, n_RI))
       ALLOCATE (chi_R(n_RI, n_RI, nimages_scf_desymm))
 
-      IF (bs_env%low_rank_approx_W_eps > 0.0_dp) THEN
-         ALLOCATE (W_lowrank_training_sum(n_RI, n_RI))
-         W_lowrank_training_sum(:, :) = z_zero
+      IF (bs_env_do_LR(bs_env)) THEN
+         ikp_local = 0
+         DO ikp = 1, bs_env%nkp_scf_desymm
+            IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
+            ikp_local = ikp_local + 1
+         END DO
+         ALLOCATE (W_lowrank_training_sums(n_RI, n_RI, ikp_local))
+         W_lowrank_training_sums(:, :, :) = z_zero
       END IF
 
       t1 = m_walltime()
@@ -673,7 +674,7 @@ CONTAINS
          
          ! 6. W^R(iω) -> W(iω,k) [k-mesh is not extrapolated for stable mult. with M^-1(k) ]
          !            -> M^-1(k)*W(iω,k)*M^-1(k) =: Ŵ(iω,k) (stored in W_k)
-         CALL mult_W_with_Minv(W_R, W_k, W_lowrank_training_sum, bs_env, qs_env)
+         CALL mult_W_with_Minv(W_R, W_k, W_lowrank_training_sums, bs_env, qs_env)
 
          ! In case we do a low rank approximation, we require a training matrix.
          ! Hence, transform to time later and store the W^R matrices. 
@@ -685,39 +686,50 @@ CONTAINS
       DEALLOCATE(W_k, chi_k_w, M_inv)
       ALLOCATE(W_k_local(n_RI, n_RI, ikp_local))
 
-      ! if using LR approx: before calculating W^R(iτ), apply it.
-      ! TODO: outsource this? Allthough memory handling would be separated.
-      IF (bs_env%low_rank_approx_W_eps > 0.0_dp) THEN
-         ! obtain low-rank projector L
-         CALL bs_env%para_env%sum(W_lowrank_training_sum)
-         CALL calculate_W_lowrank_projector(W_lowrank_training_sum, W_lowrank_projector, bs_env)
-         n_rank = SIZE(W_lowrank_projector, 2)
-         
-         ALLOCATE(W_projector_up_down(n_RI, n_RI), W_projector_up_down_cmplx(n_RI, n_RI), &
-                  W_k_tmp(n_RI, n_RI))
-
-         ! below: project down (and, for now, up) by inserting the "identity" LL^T with L a n_RI x n_rank matrix
-         CALL DGEMM('N', 'T', n_RI, n_RI, n_rank, &
-                  1.0_dp, W_lowrank_projector, n_RI, W_lowrank_projector, n_RI, &
-                  0.0_dp, W_projector_up_down, n_RI)
-         W_projector_up_down_cmplx(:, :) = CMPLX(W_projector_up_down(:, :), 0.0_dp, KIND=dp)
-
-         IF(bs_env%para_env%is_source()) THEN
-            CALL write_matrix_to_file(W_lowrank_projector, 'W_lowrank_projector.txt')
-            ! CALL write_matrix_to_file(W_projector_up_down, 'W_lowrank_projector_updown.txt')
-         END IF
-
-         ! For debugging: exchange LL^T with identity
-         IF (debug_use_id_instead_of_projector) THEN
-            W_projector_up_down_cmplx(:, :) = z_zero
-            CALL add_on_diag(W_projector_up_down_cmplx, z_one)
-         END IF
-
+      ! obtain low-rank projectors for each (local) k-point
+      IF (bs_env_do_LR(bs_env)) THEN
          IF (ABS(bs_env%low_rank_approx_M_exponent + 1.0_dp) >= 1.0E-12_dp) THEN
             CALL get_V_tr_R(M_R, bs_env%ri_metric, bs_env%regularization_RI, bs_env, qs_env)
             ALLOCATE(M(n_RI, n_RI))
          END IF
+
+
+         ALLOCATE(W_projector_up_down(n_RI, n_RI), W_k_tmp(n_RI, n_RI))
+         IF (bs_env%unit_nr > 0) THEN
+         WRITE (bs_env%unit_nr, *) &
+         'Calculating low-rank basis for W_k. With M(k)^', bs_env%low_rank_approx_M_exponent
+         END IF
+
+         
+         ikp_local = 0
+         DO ikp = 1, bs_env%nkp_scf_desymm
+            IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
+            ikp_local = ikp_local + 1
+
+            CALL calculate_W_lowrank_projector(W_lowrank_training_sums(:, :, ikp_local), W_lowrank_projector, bs_env, ikp)
+            n_rank = SIZE(W_lowrank_projector, 2)
+            
+            ! below: project down (and, for now, up) by inserting the "identity" LL^H with L a n_RI x n_rank matrix
+            CALL ZGEMM('N', 'C', n_RI, n_RI, n_rank, &
+                     z_one, W_lowrank_projector, n_RI, W_lowrank_projector, n_RI, &
+                     z_zero, W_projector_up_down, n_RI)
+
+            ! if needed, multiply missing power of M^-1-a on both sides
+            IF (ABS(bs_env%low_rank_approx_M_exponent +1.0_dp) >= 1.0E-12_dp) THEN
+               ! M(k) = sum_R e^ikR M^R
+               CALL rs_to_kp(M_R, M, &
+                           bs_env%kpoints_scf_desymm%index_to_cell, &
+                           bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
+               CALL power(M, -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
+               CALL gemm_square(M, 'N', W_projector_up_down, 'N', W_lowrank_training_sums(:, :, ikp_local))
+            ELSE 
+               ! Reuse storage of training sums for the projectors.
+               W_lowrank_training_sums(:, :, ikp_local) = W_projector_up_down(:, :)
+            END IF
+         END DO
       END IF
+
+      IF(ALLOCATED(M_R)) DEALLOCATE(M_R)
 
       DO j_w = 1, bs_env%num_time_freq_points
          ! load W_k from disk
@@ -740,40 +752,11 @@ CONTAINS
             IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
             ikp_local = ikp_local + 1
             
-            IF (bs_env%low_rank_approx_W_eps > 0.0_dp) THEN
-               IF (apply_lowrank_approx_to_full_MWM) THEN
-                  ! apply LR approx via LL^T M^-1 W M^-1 LL^T
-                  IF (ABS(bs_env%low_rank_approx_M_exponent +1.0_dp) >= 1.0E-12_dp) THEN
-                     ! M(k) = sum_R e^ikR M^R
-                     CALL rs_to_kp(M_R, M, &
-                                 bs_env%kpoints_scf_desymm%index_to_cell, &
-                                 bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
-                     CALL power(M, -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
-                     CALL gemm_square(M, 'N', W_k_local(:, :, ikp_local), 'N', M, 'N', W_k_tmp)
-                  ELSE
-                     W_k_tmp(:, :) = W_k_local(:, :, ikp_local)
-                  END IF
-                  
-                  CALL gemm_square(W_projector_up_down_cmplx, 'N', W_k_tmp, 'N', W_projector_up_down_cmplx,&
-                                   'N', W_k_local(:, :, ikp_local))
-               ELSE
-                  ! apply LR approx via M^b LL^T M^a W M^a LL^T M^b
-                  ! apply LR approx to W_k(:,:,ikp): W_k -> LL^T W_k LL^T
-                  CALL gemm_square(W_projector_up_down_cmplx, 'N', W_k_local(:, :, ikp_local), 'N', W_projector_up_down_cmplx,&
-                                 'N', W_k_tmp)
-
-                  ! if needed, multiply missing power of M^-1-a on both sides
-                  IF (ABS(bs_env%low_rank_approx_M_exponent +1.0_dp) >= 1.0E-12_dp) THEN
-                     ! M(k) = sum_R e^ikR M^R
-                     CALL rs_to_kp(M_R, M, &
-                                 bs_env%kpoints_scf_desymm%index_to_cell, &
-                                 bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
-                     CALL power(M, -1.0_dp - bs_env%low_rank_approx_M_exponent, 0.0_dp)
-                     CALL gemm_square(M, 'N', W_k_tmp, 'N', M, 'N', W_k_local(:, :, ikp_local))
-                  ELSE
-                     W_k_local(:, :, ikp_local) = W_k_tmp(:, :)
-                  END IF
-               END IF
+            IF (bs_env_do_LR(bs_env)) THEN
+               ! apply LR approx via M^b LL^T M^a W M^a LL^T M^b
+               CALL gemm_square(W_lowrank_training_sums(:, :, ikp_local), 'N', W_k_local(:, :, ikp_local), 'N', &
+                                W_lowrank_training_sums(:, :, ikp_local), 'C', W_k_tmp)
+               W_k_local(:, :, ikp_local) = W_k_tmp(:, :)
             END IF
 
             CALL add_kp_to_all_rs(W_k_local(:, :, ikp_local), MWM_R, bs_env%kpoints_scf_desymm, ikp)
@@ -919,11 +902,11 @@ CONTAINS
 !> \param bs_env ...
 !> \param qs_env ...
 ! **************************************************************************************************
-   SUBROUTINE mult_W_with_Minv(W_R, W_k_array, W_lowrank_training_sum, bs_env, qs_env)
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :), INTENT(INOUT) :: W_R
-      COMPLEX(KIND=dp), DIMENSION(:, :, :), ALLOCATABLE, INTENT(OUT) :: W_k_array
+   SUBROUTINE mult_W_with_Minv(W_R, W_k_array, W_lowrank_training_sums, bs_env, qs_env)
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :), INTENT(INOUT)       :: W_R
+      COMPLEX(KIND=dp), DIMENSION(:, :, :), ALLOCATABLE, INTENT(OUT)   :: W_k_array
+      COMPLEX(KIND=dp), DIMENSION(:, :, :), INTENT(INOUT), OPTIONAL :: W_lowrank_training_sums
       COMPLEX(KIND=dp), DIMENSION(:, :, :), ALLOCATABLE          :: W_k_array_local
-      COMPLEX(KIND=dp), DIMENSION(:, :), INTENT(INOUT), OPTIONAL :: W_lowrank_training_sum
       TYPE(post_scf_bandstructure_type), POINTER                 :: bs_env
       TYPE(qs_environment_type), POINTER                         :: qs_env
         
@@ -970,7 +953,7 @@ CONTAINS
                        bs_env%kpoints_scf_desymm%xkp(1:3, ikp))
 
 
-         IF(PRESENT(W_lowrank_training_sum)) THEN
+         IF(PRESENT(W_lowrank_training_sums)) THEN
             ! use (M^a W M^a)^2 to train low-rank approx. projector L
             ! low-rank approximation can e.g. be applied for M^0, M^-0.5, M^-1
             IF(bs_env%low_rank_approx_M_exponent < 0.0_dp) THEN
@@ -981,7 +964,8 @@ CONTAINS
             END IF
 
             CALL gemm_square(work, 'N', work, 'N', W_k)
-            W_lowrank_training_sum(:, :) = W_lowrank_training_sum(:, :) + W_k * bs_env%kpoints_scf_desymm%wkp(ikp) ! TODO weight needed?
+            W_lowrank_training_sums(:, :, ikp_local) = W_lowrank_training_sums(:, :, ikp_local) &
+                           + W_k * bs_env%kpoints_scf_desymm%wkp(ikp) ! TODO weight needed?
          ELSE
             ! invert M_PQ(k)
             CALL power(M_inv, -1.0_dp, 0.0_dp)

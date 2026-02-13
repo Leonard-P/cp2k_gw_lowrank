@@ -7,7 +7,7 @@ MODULE gw_lowrank_approx
                                               power,&
                                               time_to_freq,&
                                               write_reals_to_file,&
-                                              low_rank_filter
+                                              write_complex_matrix_to_file
    USE kinds,                           ONLY: dp,&
                                               int_8,&
                                               default_string_length
@@ -15,11 +15,11 @@ MODULE gw_lowrank_approx
                                               fm_add_kp_to_all_rs,&
                                               fm_rs_to_kp,&
                                               rs_to_kp
-   USE machine,                         ONLY: m_walltime
+   USE machine,                         ONLY: m_walltime, m_mkdir
    USE mathconstants,                   ONLY: z_one,&
                                               z_zero
    USE mathlib,                         ONLY: gemm_square,&
-                                              diamat_all
+                                              diag_complex
    USE cp_files,                        ONLY: close_file,&
                                               open_file
    USE parallel_gemm_api,               ONLY: parallel_gemm
@@ -30,86 +30,95 @@ MODULE gw_lowrank_approx
    IMPLICIT NONE
    PRIVATE
    CHARACTER(len=*), PARAMETER, PRIVATE :: moduleN = 'gw_lowrank_approx'
-   PUBLIC :: calculate_W_lowrank_projector, W_storage_pipeline
+   PUBLIC :: calculate_W_lowrank_projector, W_storage_pipeline, bs_env_do_LR
 
 CONTAINS
 
 
 ! **************************************************************************************************
 !> \brief Calculates the projector L such that M^a W M^a ⋍ L w L^T with w = L^T M^a W M^a L and a = low_rank_approx_M_exponent
-!> \param W_R ...
-!> \param M_R ...
-!> \param L Currently complex projector (could be real for efficiency?)
+!> \param training_sum The n_RI x n_RI training sum matrix (M^a W M^a) from which the low-rank projector is constructed
+!>                     It is symmetrized in-place before the eigenvalue decomposition to ensure hermiticity.
+!> \param L Complex projector matrix (n_RI x count) to be constructed
 !> \param bs_env ...
 !> \param qs_env ...
 ! **************************************************************************************************
-   SUBROUTINE calculate_W_lowrank_projector(training_sum, L, bs_env)
-      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :), INTENT(IN)     :: training_sum
+   SUBROUTINE calculate_W_lowrank_projector(training_sum, L, bs_env, dbg_filenr)
+      COMPLEX(KIND=dp), DIMENSION(:, :), INTENT(INOUT)               :: training_sum
       TYPE(post_scf_bandstructure_type), POINTER                     :: bs_env
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :), INTENT(OUT)       :: L
+      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :), INTENT(OUT)    :: L
+      INTEGER, OPTIONAL                                              :: dbg_filenr
+      COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)                    :: eigenvectors
 
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:)                       :: eigenvalues
-      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :)                    :: real_training_sum
 
       CHARACTER(LEN=*), PARAMETER                                    :: routineN = 'calculate_W_lowrank_projector'
-      INTEGER                                                        :: handle, count, i, j, n_RI
+      INTEGER                                                        :: handle, count, i, j, n_RI, ierr
+      CHARACTER(LEN=default_string_length)                           :: filename
 
       REAL(KIND=dp) :: real_part_norm_trainingsum, imag_part_norm_trainingsum
 
       CALL timeset(routineN, handle)
 
-      n_RI = SIZE(training_sum, 1)
-      ALLOCATE(eigenvalues(n_RI), real_training_sum(n_RI, n_RI))
-      real_training_sum(:, :) = REAL(training_sum, KIND=dp)
-
-      IF (bs_env%unit_nr > 0) THEN
-         PRINT *, "Max asymmetry in training sum (should be close to zero): ", &
-            MAXVAL(ABS(real_training_sum - TRANSPOSE(real_training_sum)))
+      ! Check if rank or epsilon are given.
+      IF(bs_env%low_rank_approx_W_rank > 0 .AND. bs_env%low_rank_approx_W_eps > 0.0_dp &
+         .AND. bs_env%para_env%is_source()) THEN
+         CPWARN("Both LOW_RANK_APPROX_W_RANK and ..._EPS are set. RANK used, EPS ignored.")
       END IF
 
+      n_RI = SIZE(training_sum, 1)
+      ALLOCATE(eigenvalues(n_RI))
+      ALLOCATE(eigenvectors(n_RI, n_RI))
+
+      ! IF (bs_env%unit_nr > 0) THEN
+      !    PRINT *, "Max asymmetry in training sum (should be close to zero): ", &
+      !       MAXVAL(ABS(training_sum - CONJG(TRANSPOSE(training_sum))))
+      ! END IF
+
       ! Ensure training_sum is hermitian
-      real_training_sum(:, :) = 0.5_dp * (real_training_sum(:,:) + TRANSPOSE(real_training_sum(:,:)))
+      training_sum(:, :) = 0.5_dp * (training_sum(:,:) +  CONJG(TRANSPOSE(training_sum(:,:))))
          
 
       ! eigenvalue decomposition of the training sum
-      CALL diamat_all(real_training_sum, eigenvalues, dac=.TRUE.)
+      CALL diag_complex(training_sum, eigenvectors, eigenvalues)
 
       real_part_norm_trainingsum = SUM(ABS(REAL(training_sum)))
       imag_part_norm_trainingsum = SUM(ABS(AIMAG(training_sum)))
 
-      IF (bs_env%unit_nr > 0) THEN
-         WRITE (bs_env%unit_nr, *) &
-            "Imaginary part of training sum (should be close to zero): ", imag_part_norm_trainingsum
-         WRITE (bs_env%unit_nr, *) &
-            "Real part of training sum: ", real_part_norm_trainingsum
-      END IF
+      ! IF (bs_env%unit_nr > 0) THEN
+      !    WRITE (bs_env%unit_nr, *) &
+      !       "Imaginary part of training sum: ", imag_part_norm_trainingsum
+      !    WRITE (bs_env%unit_nr, *) &
+      !       "Real part of training sum: ", real_part_norm_trainingsum
+      ! END IF
 
-      IF (bs_env%para_env%mepos == bs_env%para_env%source) THEN
-         CALL write_reals_to_file(eigenvalues, "eigenvalues_W_lowrank_training_sum.txt")
+      IF (bs_env%low_rank_approx_W_rank > 0) THEN
+         ! fixed rank mode
+         count = MIN(bs_env%low_rank_approx_W_rank, n_RI)
+      ELSE
+         ! Epsilon threshold mode
+         count = 0
+         DO i = 1, n_RI
+            IF (eigenvalues(i) > bs_env%low_rank_approx_W_eps) count = count + 1
+         END DO
       END IF
-
-      ! Count eigenvalues > W_lowrank_approx_eps
-      count = 0
-      DO i = 1, n_RI
-         IF (eigenvalues(i) > bs_env%low_rank_approx_W_eps) count = count + 1
-      END DO
 
       ! Construct projector L from eigenvectors with eigenvalues > threshold
       ALLOCATE (L(n_RI, count))
-      j = 0
-      DO i = 1, n_RI
-         IF (eigenvalues(i) > bs_env%low_rank_approx_W_eps) THEN
-            j = j + 1
-            L(:, j) = REAL(real_training_sum(:, i))
-         END IF
+
+      DO j = 1, count
+         i = n_RI - count + j ! Discard the n_RI - count smallest eigenvalues
+         L(:, j) = eigenvectors(:, i)
       END DO
 
-      ! PRINT *, "LT L - ID:", SUM(ABS(MATMUL(TRANSPOSE(L), L))) - count
+      IF (bs_env%para_env%is_source() .AND. PRESENT(dbg_filenr)) THEN
+         CALL m_mkdir("W_kpoint_sum_evals", ierr)
+         WRITE(filename, '(A,I4.4,A)') "W_kpoint_sum_evals/kp", dbg_filenr, ".txt"
+         CALL write_reals_to_file(eigenvalues, TRIM(filename))
 
-      IF (bs_env%unit_nr > 0) THEN
-         WRITE (bs_env%unit_nr, *) &
-            'Low-rank basis for W: using rank = ', count, ' out of ', n_RI, &
-            'with M(k)^', bs_env%low_rank_approx_M_exponent
+         CALL m_mkdir("W_kpoint_projectors", ierr)
+         WRITE(filename, '(A,I4.4,A)') "W_kpoint_projectors/kp", dbg_filenr, ".txt"
+         CALL write_complex_matrix_to_file(L, TRIM(filename))
       END IF
 
       CALL timestop(handle)
@@ -197,5 +206,18 @@ CONTAINS
    END SUBROUTINE W_storage_pipeline
 
 
+   ! **************************************************************************************************
+   !> \brief Checks if a low-rank approximation for W is requested.
+   !> \param bs_env The bandstructure environment
+   !> \return use_lr True if rank or epsilon threshold is set
+   ! **************************************************************************************************
+      PURE FUNCTION bs_env_do_LR(bs_env) RESULT(use_lr)
+         TYPE(post_scf_bandstructure_type), INTENT(IN)      :: bs_env
+         LOGICAL                                            :: use_lr
+
+         use_lr = (bs_env%low_rank_approx_W_rank > 0) .OR. &
+                  (bs_env%low_rank_approx_W_eps > 0.0_dp)
+
+      END FUNCTION bs_env_do_LR
 
 END MODULE gw_lowrank_approx
