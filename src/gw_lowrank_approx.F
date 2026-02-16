@@ -111,7 +111,7 @@ CONTAINS
          L(:, j) = eigenvectors(:, i)
       END DO
 
-      IF (bs_env%para_env%is_source() .AND. PRESENT(dbg_filenr)) THEN
+      IF (PRESENT(dbg_filenr)) THEN
          CALL m_mkdir("W_kpoint_sum_evals", ierr)
          WRITE(filename, '(A,I4.4,A)') "W_kpoint_sum_evals/kp", dbg_filenr, ".txt"
          CALL write_reals_to_file(eigenvalues, TRIM(filename))

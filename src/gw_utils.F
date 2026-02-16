@@ -3428,7 +3428,7 @@ CONTAINS
       CALL open_file(TRIM(filename), unit_number=iunit, file_status="REPLACE", file_action="WRITE")
 
       DO i = 1, SIZE(reals)
-         WRITE(iunit, "(F20.10)") reals(i)
+         WRITE(iunit, "(ES24.16)") reals(i)
       END DO
 
       CALL close_file(iunit)
