@@ -91,6 +91,16 @@ CONTAINS
 
       CALL cite_reference(Pasquier2025)
 
+      ! D_µν(k) = sum_n^occ C^*_µn(k) C_νn(k), V^tr_PQ^R = <phi_P,0|V^tr|phi_Q,R>
+      ! V^tr(k) = sum_R e^ikR V^tr^R, M(k) = sum_R e^ikR M^R, M(k) -> M^-1(k)
+      ! -> Ṽ^tr(k) = M^-1(k) * V^tr(k) * M^-1(k) -> Ṽ^tr_PQ^R = sum_k w_k e^-ikR Ṽ^tr_PQ(k)
+      ! Σ^x_λσ^R = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) D_µν^S2    ]
+      !                       [ sum_QR2 (σR νS1    | QR1-R2) Ṽ^tr_PQ^R2 ]
+      CALL compute_Sigma_x(bs_env, qs_env)
+
+      PRINT *, 'STOP!'
+      STOP
+
       ! G^occ_µλ(i|τ|,k) = sum_n^occ C_µn(k)^* e^(-|(ϵ_nk-ϵ_F)τ|) C_λn(k)
       ! G^vir_µλ(i|τ|,k) = sum_n^vir C_µn(k)^* e^(-|(ϵ_nk-ϵ_F)τ|) C_λn(k)
       ! k-point k -> cell S: G^occ/vir_µλ^S(i|τ|) = sum_k w_k G^occ/vir_µλ(i|τ|,k) e^(ikS)
@@ -101,13 +111,6 @@ CONTAINS
       ! χ_PQ^R(iτ) -> χ_PQ(iω,k) -> ε_PQ(iω,k) -> W_PQ(iω,k) -> Ŵ(iω,k) = M^-1(k)*W(iω,k)*M^-1(k)
       !            -> Ŵ_PQ^R(iτ)
       CALL compute_W_real_space(bs_env, qs_env)
-
-      ! D_µν(k) = sum_n^occ C^*_µn(k) C_νn(k), V^tr_PQ^R = <phi_P,0|V^tr|phi_Q,R>
-      ! V^tr(k) = sum_R e^ikR V^tr^R, M(k) = sum_R e^ikR M^R, M(k) -> M^-1(k)
-      ! -> Ṽ^tr(k) = M^-1(k) * V^tr(k) * M^-1(k) -> Ṽ^tr_PQ^R = sum_k w_k e^-ikR Ṽ^tr_PQ(k)
-      ! Σ^x_λσ^R = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) D_µν^S2    ]
-      !                       [ sum_QR2 (σR νS1    | QR1-R2) Ṽ^tr_PQ^R2 ]
-      CALL compute_Sigma_x(bs_env, qs_env)
 
       ! Σ^c_λσ^R(iτ) = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) G^occ/vir_µν^S2(i|τ|) ]
       !                           [ sum_QR2 (σR νS1    | QR1-R2) Ŵ_PQ^R2(iτ)           ]
@@ -962,6 +965,8 @@ CONTAINS
             ELSE
                work(:, :) = W_k(:, :)
             END IF
+
+            ! PRINT *, "work non-hermitianity: ", SUM(ABS(work - TRANSPOSE(CONJG(work))))
 
             CALL gemm_square(work, 'N', work, 'N', W_k)
             W_lowrank_training_sums(:, :, ikp_local) = W_lowrank_training_sums(:, :, ikp_local) &
