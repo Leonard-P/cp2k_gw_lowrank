@@ -98,7 +98,8 @@ CONTAINS
       !                       [ sum_QR2 (σR νS1    | QR1-R2) Ṽ^tr_PQ^R2 ]
       CALL compute_Sigma_x(bs_env, qs_env)
 
-      PRINT *, 'STOP!'
+      IF (bs_env%para_env%is_source()) PRINT *, 'STOP!'
+      CALL bs_env%para_env%sync()
       STOP
 
       ! G^occ_µλ(i|τ|,k) = sum_n^occ C_µn(k)^* e^(-|(ϵ_nk-ϵ_F)τ|) C_λn(k)
