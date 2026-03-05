@@ -2673,15 +2673,15 @@ CONTAINS
          IF (desymmetrize_prv) THEN
             ! add transposed of overlap integrals
             CALL dbt_create(t3c(1, 1), t_3c_tmp)
-            DO kcell = 1, jcell
-               DO jcell = 1, nimg
+            DO jcell = 1, nimg
+               DO kcell = 1, jcell
                   CALL dbt_copy(t3c(jcell, kcell), t_3c_tmp)
                   CALL dbt_copy(t_3c_tmp, t3c(kcell, jcell), order=[1, 3, 2], summation=.TRUE., move_data=.TRUE.)
                   CALL dbt_filter(t3c(kcell, jcell), filter_eps)
                END DO
             END DO
-            DO kcell = jcell + 1, nimg
-               DO jcell = 1, nimg
+            DO jcell = 1, nimg
+               DO kcell = jcell + 1, nimg
                   CALL dbt_copy(t3c(jcell, kcell), t_3c_tmp)
                   CALL dbt_copy(t_3c_tmp, t3c(kcell, jcell), order=[1, 3, 2], summation=.FALSE., move_data=.TRUE.)
                   CALL dbt_filter(t3c(kcell, jcell), filter_eps)

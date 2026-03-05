@@ -30,7 +30,8 @@ MODULE gw_small_cell_full_kp
                                               dbt_create,&
                                               dbt_destroy,&
                                               dbt_type,&
-                                              dbt_write_blocks
+                                              dbt_write_blocks,&
+                                              dbt_filter
    USE gw_communication,                ONLY: fm_to_local_array,&
                                               fm_to_local_tensor,&
                                               local_array_to_fm,&
@@ -62,6 +63,11 @@ MODULE gw_small_cell_full_kp
    USE post_scf_bandstructure_types,    ONLY: post_scf_bandstructure_type
    USE post_scf_bandstructure_utils,    ONLY: get_all_VBM_CBM_bandgaps
    USE qs_environment_types,            ONLY: qs_environment_type
+   USE qs_neighbor_list_types,          ONLY: neighbor_list_iterator_create,&
+                                              neighbor_list_iterate,&
+                                              get_iterator_info,&
+                                              neighbor_list_iterator_release,&
+                                              neighbor_list_iterator_p_type
 #include "./base/base_uses.f90"
 
    IMPLICIT NONE
@@ -91,18 +97,16 @@ CONTAINS
 
       CALL timeset(routineN, handle)
 
-      CALL cite_reference(Pasquier2025)
-
       ! D_µν(k) = sum_n^occ C^*_µn(k) C_νn(k), V^tr_PQ^R = <phi_P,0|V^tr|phi_Q,R>
       ! V^tr(k) = sum_R e^ikR V^tr^R, M(k) = sum_R e^ikR M^R, M(k) -> M^-1(k)
       ! -> Ṽ^tr(k) = M^-1(k) * V^tr(k) * M^-1(k) -> Ṽ^tr_PQ^R = sum_k w_k e^-ikR Ṽ^tr_PQ(k)
       ! Σ^x_λσ^R = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) D_µν^S2    ]
       !                       [ sum_QR2 (σR νS1    | QR1-R2) Ṽ^tr_PQ^R2 ]
       CALL compute_Sigma_x(bs_env, qs_env)
-
-      IF (bs_env%para_env%is_source()) PRINT *, 'STOP!'
       CALL bs_env%para_env%sync()
       STOP
+
+      CALL cite_reference(Pasquier2025)
 
       ! G^occ_µλ(i|τ|,k) = sum_n^occ C_µn(k)^* e^(-|(ϵ_nk-ϵ_F)τ|) C_λn(k)
       ! G^vir_µλ(i|τ|,k) = sum_n^vir C_µn(k)^* e^(-|(ϵ_nk-ϵ_F)τ|) C_λn(k)
@@ -118,6 +122,8 @@ CONTAINS
       ! Σ^c_λσ^R(iτ) = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) G^occ/vir_µν^S2(i|τ|) ]
       !                           [ sum_QR2 (σR νS1    | QR1-R2) Ŵ_PQ^R2(iτ)           ]
       CALL compute_Sigma_c(bs_env)
+
+
 
       ! Σ^c_λσ^R(iτ,k=0) -> Σ^c_nn(ϵ,k); ϵ_nk^GW = ϵ_nk^DFT + Σ^c_nn(ϵ,k) + Σ^x_nn(k) - v^xc_nn(k)
       CALL compute_QP_energies(bs_env)
@@ -309,11 +315,12 @@ CONTAINS
       INTEGER, DIMENSION(3)                              :: cell_R1, cell_R1_plus_cell_S, cell_R2, &
                                                             cell_S
       LOGICAL                                            :: cell_found
-      TYPE(dbt_type)                                     :: t_3c_int
+      TYPE(dbt_type)                                     :: t_3c_int, t_M_tmp
 
       CALL timeset(routineN, handle)
 
       CALL dbt_create(bs_env%t_RI_AO__AO, t_3c_int)
+      CALL dbt_create(bs_env%t_RI_AO__AO, t_M_tmp)
 
       cell_R1(1:3) = bs_env%index_to_cell_3c(1:3, i_cell_R1)
       cell_R2(1:3) = bs_env%index_to_cell_3c(1:3, i_cell_R2)
@@ -339,17 +346,20 @@ CONTAINS
          CALL dbt_contract(alpha=1.0_dp, &
                            tensor_1=t_3c_int, &
                            tensor_2=t_G_S(i_cell_S), &
-                           beta=1.0_dp, &
-                           tensor_3=t_M(i_cell_R1, i_cell_R2), &
+                           beta=0.0_dp, &
+                           tensor_3=t_M_tmp, &
                            contract_1=[3], notcontract_1=[1, 2], map_1=[1, 2], &
                            contract_2=[2], notcontract_2=[1], map_2=[3], &
                            filter_eps=bs_env%eps_filter, flop=flop)
+
+         CALL dbt_copy(t_M_tmp, t_M(i_cell_R1, i_cell_R2), summation=.TRUE., move_data=.TRUE.)
 
          IF (flop == 0_int_8) skip_DR_R1_S_Gx3c(i_task_Delta_R_local, i_cell_R1, i_cell_S) = .TRUE.
 
       END DO
 
       CALL dbt_destroy(t_3c_int)
+      CALL dbt_destroy(t_M_tmp)
 
       CALL timestop(handle)
 
@@ -496,12 +506,13 @@ CONTAINS
                                                             cell_R1_minus_R, cell_R2, &
                                                             cell_R2_minus_R
       LOGICAL                                            :: cell_found
-      TYPE(dbt_type)                                     :: t_Gocc_2, t_Gvir_2
+      TYPE(dbt_type)                                     :: t_Gocc_2, t_Gvir_2, t_chi_tmp
 
       CALL timeset(routineN, handle)
 
       CALL dbt_create(bs_env%t_RI__AO_AO, t_Gocc_2)
       CALL dbt_create(bs_env%t_RI__AO_AO, t_Gvir_2)
+      CALL dbt_create(bs_env%t_chi, t_chi_tmp)
 
       flop = 0_int_8
 
@@ -540,10 +551,12 @@ CONTAINS
             ! χ_PQ^R(iτ) = sum_λR1,νR2 M^occ_λR1,νR2,P0 M^vir_νR2,λR1,QR
             CALL dbt_contract(alpha=bs_env%spin_degeneracy, &
                               tensor_1=t_Gocc_2, tensor_2=t_Gvir_2, &
-                              beta=1.0_dp, tensor_3=t_chi_R(i_cell_R), &
+                              beta=0.0_dp, tensor_3=t_chi_tmp, &
                               contract_1=[2, 3], notcontract_1=[1], map_1=[1], &
                               contract_2=[2, 3], notcontract_2=[1], map_2=[2], &
                               filter_eps=bs_env%eps_filter, move_data=.TRUE., flop=flop_tmp)
+
+            CALL dbt_copy(t_chi_tmp, t_chi_R(i_cell_R), summation=.TRUE., move_data=.TRUE.)
 
             IF (flop_tmp == 0_int_8) bs_env%skip_DR_R_R2_MxM_chi(i_task_Delta_R_local, &
                                                                  i_cell_R2, i_cell_R) = .TRUE.
@@ -566,6 +579,7 @@ CONTAINS
 
       CALL dbt_destroy(t_Gocc_2)
       CALL dbt_destroy(t_Gvir_2)
+      CALL dbt_destroy(t_chi_tmp)
 
       CALL timestop(handle)
 
@@ -1023,8 +1037,9 @@ CONTAINS
       TYPE(dbt_type), ALLOCATABLE, DIMENSION(:, :)       :: t_V
       ! DEBUG_SIGMA_X variables
       INTEGER                                            :: dbg_ierr, dbg_unit, dbg_log_unit, &
-                                                            dbg_iR, dbg_iS1, dbg_iR1
+                                                            dbg_iR, i
       CHARACTER(LEN=256)                                 :: dbg_fname
+      REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: sigma_x_arr
 
       CALL timeset(routineN, handle)
 
@@ -1032,8 +1047,10 @@ CONTAINS
       IF (bs_env%para_env%mepos == 0) THEN
          CALL m_mkdir("debug_sigmax", dbg_ierr)
          CALL m_mkdir("debug_sigmax/rank_logs", dbg_ierr)
+         CALL m_mkdir("debug_sigmax/Sigma_x_R", dbg_ierr)
       END IF
       CALL bs_env%para_env%sync()
+
       ! --- DEBUG_SIGMA_X: open per-rank debug log file ---
       WRITE (dbg_fname, '(A,I0,A)') 'debug_sigmax/rank_logs/rank', &
          bs_env%para_env%mepos, '.log'
@@ -1058,23 +1075,30 @@ CONTAINS
       CALL get_Minv_Vtr_Minv_R(Mi_Vtr_Mi_R, bs_env, qs_env)
 
       ! --- DEBUG_SIGMA_X: dump Mi_Vtr_Mi_R tensors (each rank writes its blocks) ---
-      WRITE (dbg_log_unit, '(A,I0,A)') 'DEBUG_SX: rank=', bs_env%para_env%mepos, &
-         ' Mi_Vtr_Mi_R computed, dumping tensors'
-      WRITE (dbg_fname, '(A,I0,A)') 'debug_sigmax/Mi_Vtr_Mi_R_dbt_rank', &
-         bs_env%para_env%mepos, '.dat'
-      OPEN (NEWUNIT=dbg_unit, FILE=TRIM(dbg_fname), STATUS='REPLACE', ACTION='WRITE')
-      DO dbg_iR = 1, bs_env%nimages_scf_desymm
-         WRITE (dbg_unit, '(A,I6,A,3I4,A,I6)') '# i_cell_R=', dbg_iR, &
-            ' cell=', bs_env%kpoints_scf_desymm%index_to_cell(1:3, dbg_iR), &
-            'dbg unit', dbg_unit
-!$OMP PARALLEL DEFAULT(NONE) SHARED(Mi_Vtr_Mi_R, dbg_iR, dbg_unit)
-         CALL dbt_write_blocks(Mi_Vtr_Mi_R(dbg_iR), 0, dbg_unit)
-!$OMP END PARALLEL
-      END DO
-      CLOSE (dbg_unit)
+      ! WRITE (dbg_log_unit, '(A,I0,A)') 'DEBUG_SX: rank=', bs_env%para_env%mepos, &
+      !    ' Mi_Vtr_Mi_R computed, DUMPING SKIPPED (commented out)'
+      ! WRITE (dbg_fname, '(A,I0,A)') 'debug_sigmax/Mi_Vtr_Mi_R_dbt_rank', &
+      !    bs_env%para_env%mepos, '.dat'
+      ! OPEN (NEWUNIT=dbg_unit, FILE=TRIM(dbg_fname), STATUS='REPLACE', ACTION='WRITE')
+      ! DO dbg_iR = 1, bs_env%nimages_scf_desymm
+      !    WRITE (dbg_unit, '(A,I6,A,3I4,A,I6)') '# i_cell_R=', dbg_iR, &
+      !       ' cell=', bs_env%kpoints_scf_desymm%index_to_cell(1:3, dbg_iR), &
+      !       'dbg unit', dbg_unit
+      !    !$OMP PARALLEL DEFAULT(NONE) SHARED(Mi_Vtr_Mi_R, dbg_iR, dbg_unit)
+      !    CALL dbt_write_blocks(Mi_Vtr_Mi_R(dbg_iR), 0, dbg_unit)
+      !    !$OMP END PARALLEL
+      ! END DO
+      ! CLOSE (dbg_unit)
 
       ! Σ^x_λσ^R = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) D_µν^S2       ]
       !                       [ sum_QR2 (σR νS1    | QR1-R2) Ṽ^tr_PQ^R2 ]
+
+      ! Reset skip arrays: they may have been filled by compute_Sigma_c (fill_skip=.TRUE.
+      ! for G^vir), but Sigma_x uses D (occ density) with a different sparsity pattern.
+      bs_env%skip_DR_Sigma(:) = .FALSE.
+      bs_env%skip_DR_R1_S2_Gx3c_Sigma(:, :, :) = .FALSE.
+      bs_env%skip_DR_R1_R_MxM_Sigma(:, :, :) = .FALSE.
+
       DO ispin = 1, bs_env%n_spin
 
          ! compute D^S(iτ) for cell S from D_µν(k) = sum_n^occ C^*_µn(k) C_νn(k):
@@ -1082,24 +1106,24 @@ CONTAINS
          CALL G_occ_vir(bs_env, 0.0_dp, D_S, ispin, occ=.TRUE., vir=.FALSE.)
 
          ! --- DEBUG_SIGMA_X: dump D_S tensors (each rank writes its blocks) ---
-         WRITE (dbg_log_unit, '(A,I0,A,I0)') 'DEBUG_SX: rank=', bs_env%para_env%mepos, &
-            ' D_S computed for ispin=', ispin
-         WRITE (dbg_fname, '(A,I0,A,I1,A)') 'debug_sigmax/D_S_rank', &
-            bs_env%para_env%mepos, '_spin', ispin, '.dat'
-         OPEN (NEWUNIT=dbg_unit, FILE=TRIM(dbg_fname), STATUS='REPLACE', ACTION='WRITE')
-         DO dbg_iR = 1, bs_env%nimages_scf_desymm
-            WRITE (dbg_unit, '(A,I6,A,3I4)') '# i_cell_S=', dbg_iR, &
-               ' cell=', bs_env%kpoints_scf_desymm%index_to_cell(1:3, dbg_iR)
-!$OMP PARALLEL DEFAULT(NONE) SHARED(D_S, dbg_iR, dbg_unit)
-            CALL dbt_write_blocks(D_S(dbg_iR), 0, dbg_unit)
-!$OMP END PARALLEL
-         END DO
-         CLOSE (dbg_unit)
+         ! WRITE (dbg_log_unit, '(A,I0,A,I0)') 'DEBUG_SX: rank=', bs_env%para_env%mepos, &
+         !   ' D_S computed (dumping skipped) for ispin=', ispin
+         ! WRITE (dbg_fname, '(A,I0,A,I1,A)') 'debug_sigmax/D_S_rank', &
+         !    bs_env%para_env%mepos, '_spin', ispin, '.dat'
+         ! OPEN (NEWUNIT=dbg_unit, FILE=TRIM(dbg_fname), STATUS='REPLACE', ACTION='WRITE')
+         ! DO dbg_iR = 1, bs_env%nimages_scf_desymm
+         !    WRITE (dbg_unit, '(A,I6,A,3I4)') '# i_cell_S=', dbg_iR, &
+         !       ' cell=', bs_env%kpoints_scf_desymm%index_to_cell(1:3, dbg_iR)
+         !    !$OMP PARALLEL DEFAULT(NONE) SHARED(D_S, dbg_iR, dbg_unit)
+         !    CALL dbt_write_blocks(D_S(dbg_iR), 0, dbg_unit)
+         !    !$OMP END PARALLEL
+         ! END DO
+         ! CLOSE (dbg_unit)
 
-         ! --- DEBUG_SIGMA_X: open t_V file for this rank (all Delta_R in one file) ---
-         WRITE (dbg_fname, '(A,I0,A,I1,A)') 'debug_sigmax/t_V_rank', &
-            bs_env%para_env%mepos, '_spin', ispin, '.dat'
-         OPEN (NEWUNIT=dbg_unit, FILE=TRIM(dbg_fname), STATUS='REPLACE', ACTION='WRITE')
+         ! --- DEBUG_SIGMA_X: (commented out) open t_V file for this rank ---
+         ! WRITE (dbg_fname, '(A,I0,A,I1,A)') 'debug_sigmax/t_V_rank', &
+         !    bs_env%para_env%mepos, '_spin', ispin, '.dat'
+         ! OPEN (NEWUNIT=dbg_unit, FILE=TRIM(dbg_fname), STATUS='REPLACE', ACTION='WRITE')
 
          ! loop over ΔR = S_1 - R_1 which are local in the tensor subgroup
          DO i_task_Delta_R_local = 1, bs_env%n_tasks_Delta_R_local
@@ -1108,27 +1132,27 @@ CONTAINS
             CALL contract_W(t_V, Mi_Vtr_Mi_R, bs_env, i_task_Delta_R_local, dbg_log_unit)
 
             ! --- DEBUG_SIGMA_X: print Delta_R info and dump t_V ---
-            WRITE (dbg_log_unit, '(A,I0,A,I0,A,I0,A,I0,A,3I4)') &
-               'DEBUG_SX: rank=', bs_env%para_env%mepos, &
-               ' ispin=', ispin, &
-               ' i_task_Delta_R_local=', i_task_Delta_R_local, &
-               ' i_cell_Delta_R=', bs_env%task_Delta_R(i_task_Delta_R_local), &
-               ' cell_Delta_R=', bs_env%index_to_cell_Delta_R(1:3, &
-                  bs_env%task_Delta_R(i_task_Delta_R_local))
-            WRITE (dbg_unit, '(A,I6,A,I6,A,3I4)') &
-               '# i_task_Delta_R_local=', i_task_Delta_R_local, &
-               ' i_cell_Delta_R=', bs_env%task_Delta_R(i_task_Delta_R_local), &
-               ' cell=', bs_env%index_to_cell_Delta_R(1:3, &
-                  bs_env%task_Delta_R(i_task_Delta_R_local))
-            DO dbg_iS1 = 1, bs_env%nimages_3c
-               DO dbg_iR1 = 1, bs_env%nimages_3c
-                  WRITE (dbg_unit, '(A,I4,A,I4)') '# t_V: i_cell_S1=', dbg_iS1, &
-                     ' i_cell_R1=', dbg_iR1
-!$OMP PARALLEL DEFAULT(NONE) SHARED(t_V, dbg_iS1, dbg_iR1, dbg_unit)
-                  CALL dbt_write_blocks(t_V(dbg_iS1, dbg_iR1), 0, dbg_unit)
-!$OMP END PARALLEL
-               END DO
-            END DO
+            ! WRITE (dbg_log_unit, '(A,I0,A,I0,A,I0,A,I0,A,3I4)') &
+            !    'DEBUG_SX: rank=', bs_env%para_env%mepos, &
+            !    ' ispin=', ispin, &
+            !    ' i_task_Delta_R_local=', i_task_Delta_R_local, &
+            !    ' i_cell_Delta_R=', bs_env%task_Delta_R(i_task_Delta_R_local), &
+            !    ' cell_Delta_R=', bs_env%index_to_cell_Delta_R(1:3, &
+            !       bs_env%task_Delta_R(i_task_Delta_R_local))
+            ! WRITE (dbg_unit, '(A,I6,A,I6,A,3I4)') &
+            !    '# i_task_Delta_R_local=', i_task_Delta_R_local, &
+            !    ' i_cell_Delta_R=', bs_env%task_Delta_R(i_task_Delta_R_local), &
+            !    ' cell=', bs_env%index_to_cell_Delta_R(1:3, &
+            !       bs_env%task_Delta_R(i_task_Delta_R_local))
+            ! DO dbg_iS1 = 1, bs_env%nimages_3c
+            !    DO dbg_iR1 = 1, bs_env%nimages_3c
+            !       WRITE (dbg_unit, '(A,I4,A,I4)') '# t_V: i_cell_S1=', dbg_iS1, &
+            !          ' i_cell_R1=', dbg_iR1
+            !       !$OMP PARALLEL DEFAULT(NONE) SHARED(t_V, dbg_iS1, dbg_iR1, dbg_unit)
+            !       CALL dbt_write_blocks(t_V(dbg_iS1, dbg_iR1), 0, dbg_unit)
+            !       !$OMP END PARALLEL
+            !    END DO
+            ! END DO
 
             ! M^D_λ0,νS1,PR1 = sum_µS2 (λ0 µS1-S2 | PR1) D_µν^S2
             ! Σ^x_λσ^R = sum_PR1νS1 M^D_λ0,νS1,PR1 * M^V_σR,νS1,PR1 for i_task_local, where
@@ -1140,12 +1164,33 @@ CONTAINS
          END DO ! i_cell_Delta_R_local
 
          ! --- DEBUG_SIGMA_X: close t_V file ---
-         CLOSE (dbg_unit)
+         ! CLOSE (dbg_unit)
 
          CALL bs_env%para_env%sync()
 
          CALL local_dbt_to_global_fm(Sigma_x_R, bs_env%fm_Sigma_x_R, bs_env%mat_ao_ao, &
                                      bs_env%mat_ao_ao_tensor, bs_env)
+
+         ! --- DEBUG_SIGMA_X: dump Sigma_x_R (one file per cell, from master) ---
+         ALLOCATE (sigma_x_arr(bs_env%n_ao, bs_env%n_ao, 1))
+
+         DO dbg_iR = 1, bs_env%nimages_scf_desymm
+
+            CALL fm_to_local_array(bs_env%fm_Sigma_x_R(dbg_iR:dbg_iR), sigma_x_arr, add=.FALSE.)
+
+            IF (bs_env%para_env%mepos == 0) THEN
+               WRITE (dbg_fname, '(A,I0,A,I1,A)') 'debug_sigmax/Sigma_x_R/Sigma_x_R_cell', &
+                  dbg_iR, '_spin', ispin, '.dat'
+               OPEN (NEWUNIT=dbg_unit, FILE=TRIM(dbg_fname), STATUS='REPLACE', ACTION='WRITE')
+               WRITE (dbg_unit, '(A,I6,A,3I4)') '# i_cell_R=', dbg_iR, &
+                  ' cell=', bs_env%kpoints_scf_desymm%index_to_cell(1:3, dbg_iR)
+               DO i = 1, bs_env%n_ao
+                  WRITE (dbg_unit, *) sigma_x_arr(i, 1:bs_env%n_ao, 1)
+               END DO
+               CLOSE (dbg_unit)
+            END IF
+         END DO
+         DEALLOCATE (sigma_x_arr)
 
       END DO ! ispin
 
@@ -1468,6 +1513,13 @@ CONTAINS
                               contract_2=[1], notcontract_2=[2, 3], map_2=[2, 3], &
                               filter_eps=bs_env%eps_filter)
 
+            IF (PRESENT(dbg_log_unit)) THEN
+               WRITE (dbg_log_unit, '(A,I0,A,I0,A,I4,I4)') &
+                  'Wcontr: rank=', bs_env%para_env%mepos, &
+                  ' i_cell_Delta_R=', i_cell_Delta_R, &
+                  ' R1, S2=', i_cell_R1, i_cell_R2
+            END IF
+
             ! reorder tensor
             CALL dbt_copy(t_W_tmp, t_W(i_cell_S1, i_cell_R1), order=[1, 2, 3], &
                           move_data=.TRUE., summation=.TRUE.)
@@ -1516,7 +1568,8 @@ CONTAINS
                                                             cell_S2
       LOGICAL                                            :: cell_found
       REAL(KIND=dp)                                      :: sign_Sigma
-      TYPE(dbt_type)                                     :: t_3c_int, t_G, t_G_2
+      TYPE(dbt_type)                                     :: t_3c_int, t_G, t_G_2, t_G_tmp, &
+                                                            t_Sigma_tmp
 
       CALL timeset(routineN, handle)
 
@@ -1526,7 +1579,9 @@ CONTAINS
 
       CALL dbt_create(bs_env%t_RI_AO__AO, t_G)
       CALL dbt_create(bs_env%t_RI_AO__AO, t_G_2)
+      CALL dbt_create(bs_env%t_RI_AO__AO, t_G_tmp)
       CALL dbt_create(bs_env%t_RI_AO__AO, t_3c_int)
+      CALL dbt_create(bs_env%t_G, t_Sigma_tmp)
 
       i_cell_Delta_R = bs_env%task_Delta_R(i_task_Delta_R_local)
 
@@ -1576,14 +1631,19 @@ CONTAINS
             ! M_λ0,νS1,PR1 = sum_µS2 ( λ0   µS1-S2    | PR1 ) G^occ/vir_µν^S2(i|τ|)
             !              = sum_µS2 ( λ-R1 µS1-S2-R1 | P0  ) G^occ/vir_µν^S2(i|τ|)
             ! for ΔR = S_1 - R_1
+            ! Contract into a fresh temporary so that eps_filter is applied
+            ! to this iteration's result only (not the accumulated sum).
+            ! This makes the filter decision independent of MPI distribution.
             CALL dbt_contract(alpha=1.0_dp, &
                               tensor_1=G_S(i_cell_S2), &
                               tensor_2=t_3c_int, &
-                              beta=1.0_dp, &
-                              tensor_3=t_G, &
+                              beta=0.0_dp, &
+                              tensor_3=t_G_tmp, &
                               contract_1=[2], notcontract_1=[1], map_1=[3], &
                               contract_2=[3], notcontract_2=[1, 2], map_2=[1, 2], &
                               filter_eps=bs_env%eps_filter, flop=flop_tmp)
+
+            CALL dbt_copy(t_G_tmp, t_G, summation=.TRUE., move_data=.TRUE.)
 
             IF (flop_tmp == 0_int_8 .AND. fill_skip) THEN
                bs_env%skip_DR_R1_S2_Gx3c_Sigma(i_task_Delta_R_local, i_cell_R1, i_cell_S2) = .TRUE.
@@ -1619,11 +1679,13 @@ CONTAINS
             CALL dbt_contract(alpha=sign_Sigma, &
                               tensor_1=t_G_2, &
                               tensor_2=t_W(i_cell_S1_minus_R, i_cell_R1_minus_R), &
-                              beta=1.0_dp, &
-                              tensor_3=Sigma_R(i_cell_R), &
+                              beta=0.0_dp, &
+                              tensor_3=t_Sigma_tmp, &
                               contract_1=[1, 2], notcontract_1=[3], map_1=[1], &
                               contract_2=[1, 2], notcontract_2=[3], map_2=[2], &
                               filter_eps=bs_env%eps_filter, flop=flop_tmp)
+
+            CALL dbt_copy(t_Sigma_tmp, Sigma_R(i_cell_R), summation=.TRUE., move_data=.TRUE.)
 
             flop = flop + flop_tmp
 
@@ -1659,7 +1721,9 @@ CONTAINS
 
       CALL dbt_destroy(t_G)
       CALL dbt_destroy(t_G_2)
+      CALL dbt_destroy(t_G_tmp)
       CALL dbt_destroy(t_3c_int)
+      CALL dbt_destroy(t_Sigma_tmp)
 
       CALL timestop(handle)
 
