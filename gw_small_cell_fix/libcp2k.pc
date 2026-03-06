@@ -1,0 +1,11 @@
+prefix="/opt/software/pc2/EB-SW/software/CP2K/2025.2-foss-2025a-gcc-openmpi-aocl/tools/toolchain/install/dbcsr-2.8.0"
+exec_prefix="${prefix}"
+libdir="${prefix}/lib64"
+includedir="${prefix}/include"
+
+Name: cp2k
+Description: CP2K
+URL: https://www.cp2k.org
+Version: 2026.1
+Cflags: -I"${includedir}/cp2k" -I"${includedir}/cp2k/GNU-14.2.0"
+Libs: -L"${libdir}" -lcp2k
