@@ -314,7 +314,10 @@ void dbm_multiply(const bool transa, const bool transb, const double alpha,
                   const dbm_matrix_t *matrix_a, const dbm_matrix_t *matrix_b,
                   const double beta, dbm_matrix_t *matrix_c,
                   const bool retain_sparsity, const double filter_eps,
-                  int64_t *flop) {
+                  const double filter_eps_post, int64_t *flop) {
+  // Use filter_eps for post-filter when filter_eps_post is negative (legacy).
+  const double post_eps =
+      (filter_eps_post < 0.0) ? filter_eps : filter_eps_post;
   assert(omp_get_num_threads() == 1);
   assert(matrix_a != NULL && matrix_b != NULL && matrix_c != NULL);
 
@@ -402,7 +405,7 @@ void dbm_multiply(const bool transa, const bool transb, const double alpha,
   free(rows_max_eps);
 
   // Final filter pass.
-  dbm_filter(matrix_c, filter_eps);
+  dbm_filter(matrix_c, post_eps);
 }
 
 // EOF

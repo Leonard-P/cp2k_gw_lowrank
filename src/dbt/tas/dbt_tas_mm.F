@@ -579,7 +579,9 @@ CONTAINS
          CALL timeset("dbt_tas_mm_2", handle3)
          CALL dbm_multiply(transa=transa_prv, transb=transb_prv, alpha=alpha, matrix_a=matrix_a_mm, &
                            matrix_b=matrix_b_mm, beta=beta, matrix_c=matrix_c_mm, &
-                           filter_eps=filter_eps_prv/REAL(nsplit, KIND=dp), retain_sparsity=retain_sparsity, flop=flop)
+                           filter_eps=filter_eps_prv/REAL(nsplit, KIND=dp), &
+                           retain_sparsity=retain_sparsity, flop=flop, &
+                           filter_eps_post=0.0_dp)
          CALL matrix_a%dist%info%mp_comm%sync()
          CALL timestop(handle3)
          CALL timestop(handle4)

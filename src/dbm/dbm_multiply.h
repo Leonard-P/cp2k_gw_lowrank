@@ -16,21 +16,23 @@
  * \brief Performs a multiplication of two dbm_matrix_t matrices,
           as  C := alpha * op( A ) * op( B ) + beta * C.
 
-          The filter_eps parameter is used to filter the resulting matrix.
-          The filtering criterion is whether the block-frobenius norm is less
-          than the specified epsilon. One-the-fly filtering is done such that
+          The filter_eps parameter is used for on-the-fly pre-screening:
           individual multiplications are skipped if the product of the frobenius
           norms of the left- and right-matrix blocks are less than the specified
           epsilon divided by the maximum number of possible multiplies in each
-          row. In addition a final filtering is done as well with the same
-          epsilon value.
+          row.
+
+          The filter_eps_post parameter controls the final post-multiply
+          filtering of C (blocks with frobenius norm below this threshold are
+          removed). When set to a negative value, filter_eps is used instead
+          (legacy behavior).
  * \author Ole Schuett
  ******************************************************************************/
 void dbm_multiply(const bool transa, const bool transb, const double alpha,
                   const dbm_matrix_t *matrix_a, const dbm_matrix_t *matrix_b,
                   const double beta, dbm_matrix_t *matrix_c,
                   const bool retain_sparsity, const double filter_eps,
-                  int64_t *flop);
+                  const double filter_eps_post, int64_t *flop);
 
 #endif
 

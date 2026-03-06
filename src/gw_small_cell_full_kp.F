@@ -97,15 +97,6 @@ CONTAINS
 
       CALL timeset(routineN, handle)
 
-      ! D_µν(k) = sum_n^occ C^*_µn(k) C_νn(k), V^tr_PQ^R = <phi_P,0|V^tr|phi_Q,R>
-      ! V^tr(k) = sum_R e^ikR V^tr^R, M(k) = sum_R e^ikR M^R, M(k) -> M^-1(k)
-      ! -> Ṽ^tr(k) = M^-1(k) * V^tr(k) * M^-1(k) -> Ṽ^tr_PQ^R = sum_k w_k e^-ikR Ṽ^tr_PQ(k)
-      ! Σ^x_λσ^R = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) D_µν^S2    ]
-      !                       [ sum_QR2 (σR νS1    | QR1-R2) Ṽ^tr_PQ^R2 ]
-      CALL compute_Sigma_x(bs_env, qs_env)
-      CALL bs_env%para_env%sync()
-      STOP
-
       CALL cite_reference(Pasquier2025)
 
       ! G^occ_µλ(i|τ|,k) = sum_n^occ C_µn(k)^* e^(-|(ϵ_nk-ϵ_F)τ|) C_λn(k)
@@ -119,6 +110,13 @@ CONTAINS
       !            -> Ŵ_PQ^R(iτ)
       CALL compute_W_real_space(bs_env, qs_env)
 
+      ! D_µν(k) = sum_n^occ C^*_µn(k) C_νn(k), V^tr_PQ^R = <phi_P,0|V^tr|phi_Q,R>
+      ! V^tr(k) = sum_R e^ikR V^tr^R, M(k) = sum_R e^ikR M^R, M(k) -> M^-1(k)
+      ! -> Ṽ^tr(k) = M^-1(k) * V^tr(k) * M^-1(k) -> Ṽ^tr_PQ^R = sum_k w_k e^-ikR Ṽ^tr_PQ(k)
+      ! Σ^x_λσ^R = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) D_µν^S2    ]
+      !                       [ sum_QR2 (σR νS1    | QR1-R2) Ṽ^tr_PQ^R2 ]
+      CALL compute_Sigma_x(bs_env, qs_env)
+     
       ! Σ^c_λσ^R(iτ) = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) G^occ/vir_µν^S2(i|τ|) ]
       !                           [ sum_QR2 (σR νS1    | QR1-R2) Ŵ_PQ^R2(iτ)           ]
       CALL compute_Sigma_c(bs_env)
@@ -346,13 +344,13 @@ CONTAINS
          CALL dbt_contract(alpha=1.0_dp, &
                            tensor_1=t_3c_int, &
                            tensor_2=t_G_S(i_cell_S), &
-                           beta=0.0_dp, &
-                           tensor_3=t_M_tmp, &
+                           beta=1.0_dp, &
+                           tensor_3=t_M(i_cell_R1, i_cell_R2), &
                            contract_1=[3], notcontract_1=[1, 2], map_1=[1, 2], &
                            contract_2=[2], notcontract_2=[1], map_2=[3], &
                            filter_eps=bs_env%eps_filter, flop=flop)
 
-         CALL dbt_copy(t_M_tmp, t_M(i_cell_R1, i_cell_R2), summation=.TRUE., move_data=.TRUE.)
+         ! CALL dbt_copy(t_M_tmp, t_M(i_cell_R1, i_cell_R2), summation=.TRUE., move_data=.TRUE.)
 
          IF (flop == 0_int_8) skip_DR_R1_S_Gx3c(i_task_Delta_R_local, i_cell_R1, i_cell_S) = .TRUE.
 
@@ -551,12 +549,12 @@ CONTAINS
             ! χ_PQ^R(iτ) = sum_λR1,νR2 M^occ_λR1,νR2,P0 M^vir_νR2,λR1,QR
             CALL dbt_contract(alpha=bs_env%spin_degeneracy, &
                               tensor_1=t_Gocc_2, tensor_2=t_Gvir_2, &
-                              beta=0.0_dp, tensor_3=t_chi_tmp, &
+                              beta=1.0_dp, tensor_3=t_chi_R(i_cell_R), &
                               contract_1=[2, 3], notcontract_1=[1], map_1=[1], &
                               contract_2=[2, 3], notcontract_2=[1], map_2=[2], &
                               filter_eps=bs_env%eps_filter, move_data=.TRUE., flop=flop_tmp)
 
-            CALL dbt_copy(t_chi_tmp, t_chi_R(i_cell_R), summation=.TRUE., move_data=.TRUE.)
+            ! CALL dbt_copy(t_chi_tmp, t_chi_R(i_cell_R), summation=.TRUE., move_data=.TRUE.)
 
             IF (flop_tmp == 0_int_8) bs_env%skip_DR_R_R2_MxM_chi(i_task_Delta_R_local, &
                                                                  i_cell_R2, i_cell_R) = .TRUE.
@@ -1631,19 +1629,23 @@ CONTAINS
             ! M_λ0,νS1,PR1 = sum_µS2 ( λ0   µS1-S2    | PR1 ) G^occ/vir_µν^S2(i|τ|)
             !              = sum_µS2 ( λ-R1 µS1-S2-R1 | P0  ) G^occ/vir_µν^S2(i|τ|)
             ! for ΔR = S_1 - R_1
-            ! Contract into a fresh temporary so that eps_filter is applied
-            ! to this iteration's result only (not the accumulated sum).
-            ! This makes the filter decision independent of MPI distribution.
+            IF (PRESENT(dbg_log_unit)) THEN
+               WRITE (dbg_log_unit, '(A,I4,A,I4,A,I4,A,I4)') &
+                  '1Scontr rnk=', bs_env%para_env%mepos, &
+                  ' i_cell_Delta_R=', i_cell_Delta_R, ' imR1=', i_cell_m_R1,&
+                  ' iS1pS2mR1=', i_cell_S1_p_S2_m_R1
+            END IF
+
             CALL dbt_contract(alpha=1.0_dp, &
                               tensor_1=G_S(i_cell_S2), &
                               tensor_2=t_3c_int, &
-                              beta=0.0_dp, &
-                              tensor_3=t_G_tmp, &
+                              beta=1.0_dp, &
+                              tensor_3=t_G, &
                               contract_1=[2], notcontract_1=[1], map_1=[3], &
                               contract_2=[3], notcontract_2=[1, 2], map_2=[1, 2], &
                               filter_eps=bs_env%eps_filter, flop=flop_tmp)
 
-            CALL dbt_copy(t_G_tmp, t_G, summation=.TRUE., move_data=.TRUE.)
+            ! CALL dbt_copy(t_G_tmp, t_G, summation=.TRUE., move_data=.TRUE.)
 
             IF (flop_tmp == 0_int_8 .AND. fill_skip) THEN
                bs_env%skip_DR_R1_S2_Gx3c_Sigma(i_task_Delta_R_local, i_cell_R1, i_cell_S2) = .TRUE.
@@ -1673,19 +1675,26 @@ CONTAINS
                        cell_found, bs_env%cell_to_index_3c, i_cell_S1_minus_R)
             IF (.NOT. cell_found) CYCLE
 
+            IF (PRESENT(dbg_log_unit)) THEN
+               WRITE (dbg_log_unit, '(A,I4,A,I4,A,I4,A,I4)') &
+                  '2Scontr rnk=', bs_env%para_env%mepos, &
+                  ' i_cell_Delta_R=', i_cell_Delta_R, ' iS1mR=', i_cell_S1_minus_R,&
+                  ' iR1mR=', i_cell_R1_minus_R
+            END IF
+
             ! Σ_λσ^R = sum_PR1νS1 M^G_λ0,νS1,PR1 M^W_σR,νS1,PR1, where
             ! M^G_λ0,νS1,PR1 = sum_µS2 (λ0 µS1-S2 | PR1) G_µν^S2
             ! M^W_σR,νS1,PR1 = sum_QR2 (σR νS1 | QR1-R2) W_PQ^R2 = M^W_σ0,νS1-R,PR1-R
             CALL dbt_contract(alpha=sign_Sigma, &
                               tensor_1=t_G_2, &
                               tensor_2=t_W(i_cell_S1_minus_R, i_cell_R1_minus_R), &
-                              beta=0.0_dp, &
-                              tensor_3=t_Sigma_tmp, &
+                              beta=1.0_dp, &
+                              tensor_3=Sigma_R(i_cell_R), &
                               contract_1=[1, 2], notcontract_1=[3], map_1=[1], &
                               contract_2=[1, 2], notcontract_2=[3], map_2=[2], &
                               filter_eps=bs_env%eps_filter, flop=flop_tmp)
 
-            CALL dbt_copy(t_Sigma_tmp, Sigma_R(i_cell_R), summation=.TRUE., move_data=.TRUE.)
+            ! CALL dbt_copy(t_Sigma_tmp, Sigma_R(i_cell_R), summation=.TRUE., move_data=.TRUE.)
 
             flop = flop + flop_tmp
 
