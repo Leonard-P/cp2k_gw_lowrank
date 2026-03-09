@@ -26,13 +26,20 @@
           filtering of C (blocks with frobenius norm below this threshold are
           removed). When set to a negative value, filter_eps is used instead
           (legacy behavior).
+
+          The nblocks_per_row parameter, when non-NULL, provides externally
+          computed global block-counts per row of op(A). This overrides the
+          internal per-row counting + MPI reduction, allowing the caller to
+          supply counts that span multiple sub-groups (e.g. TAS CASE 2).
+          When NULL, the counts are computed internally as before.
  * \author Ole Schuett
  ******************************************************************************/
 void dbm_multiply(const bool transa, const bool transb, const double alpha,
                   const dbm_matrix_t *matrix_a, const dbm_matrix_t *matrix_b,
                   const double beta, dbm_matrix_t *matrix_c,
                   const bool retain_sparsity, const double filter_eps,
-                  const double filter_eps_post, int64_t *flop);
+                  const double filter_eps_post, const int *nblocks_per_row,
+                  int64_t *flop);
 
 #endif
 

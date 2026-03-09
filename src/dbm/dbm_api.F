@@ -7,7 +7,7 @@
 
 MODULE dbm_api
    USE ISO_C_BINDING, ONLY: C_ASSOCIATED, C_BOOL, C_CHAR, C_DOUBLE, C_F_POINTER, C_FUNLOC, C_FUNPTR, &
-                            C_INT, C_INT64_T, C_NULL_CHAR, C_NULL_PTR, C_PTR
+                            C_INT, C_INT64_T, C_LOC, C_NULL_CHAR, C_NULL_PTR, C_PTR
    USE kinds, ONLY: default_string_length, &
                     dp, &
                     int_8
@@ -727,12 +727,14 @@ CONTAINS
 !> \param retain_sparsity ...
 !> \param filter_eps ...
 !> \param filter_eps_post Post-multiply filter eps (defaults to filter_eps when absent).
+!> \param nblocks_per_row Global block counts per row of op(A), overriding internal counting.
 !> \param flop ...
 !> \author Ole Schuett
 ! **************************************************************************************************
    SUBROUTINE dbm_multiply(transa, transb, &
                            alpha, matrix_a, matrix_b, beta, matrix_c, &
-                           retain_sparsity, filter_eps, flop, filter_eps_post)
+                           retain_sparsity, filter_eps, flop, filter_eps_post, &
+                           nblocks_per_row)
       LOGICAL, INTENT(IN)                                :: transa, transb
       REAL(kind=dp), INTENT(IN)                          :: alpha
       TYPE(dbm_type), INTENT(IN)                         :: matrix_a, matrix_b
@@ -742,6 +744,7 @@ CONTAINS
       REAL(kind=dp), INTENT(IN), OPTIONAL                :: filter_eps
       INTEGER(int_8), INTENT(OUT), OPTIONAL              :: flop
       REAL(kind=dp), INTENT(IN), OPTIONAL                :: filter_eps_post
+      INTEGER(C_INT), INTENT(IN), OPTIONAL, TARGET       :: nblocks_per_row(:)
 
       CHARACTER(LEN=*), PARAMETER                        :: routineN = 'dbm_multiply'
 
@@ -751,12 +754,14 @@ CONTAINS
       LOGICAL                                            :: my_retain_sparsity
       REAL(kind=dp)                                      :: my_filter_eps, &
                                                             my_filter_eps_post
+      TYPE(C_PTR)                                        :: my_nblocks_per_row_ptr
       INTERFACE
          SUBROUTINE dbm_multiply_c(transa, transb, alpha, &
                                    matrix_a, matrix_b, &
                                    beta, matrix_c, &
                                    retain_sparsity, filter_eps, &
-                                   filter_eps_post, flop) &
+                                   filter_eps_post, nblocks_per_row, &
+                                   flop) &
             BIND(C, name="dbm_multiply")
             IMPORT :: C_PTR, C_DOUBLE, C_BOOL, C_INT64_T
             LOGICAL(kind=C_BOOL), VALUE                      :: transa
@@ -769,6 +774,7 @@ CONTAINS
             LOGICAL(kind=C_BOOL), VALUE                      :: retain_sparsity
             REAL(kind=C_DOUBLE), VALUE                       :: filter_eps
             REAL(kind=C_DOUBLE), VALUE                       :: filter_eps_post
+            TYPE(C_PTR), VALUE                               :: nblocks_per_row
             INTEGER(kind=C_INT64_T)                          :: flop
          END SUBROUTINE dbm_multiply_c
       END INTERFACE
@@ -793,6 +799,12 @@ CONTAINS
          my_filter_eps_post = -1.0_dp ! negative => use filter_eps in C
       END IF
 
+      IF (PRESENT(nblocks_per_row)) THEN
+         my_nblocks_per_row_ptr = C_LOC(nblocks_per_row(1))
+      ELSE
+         my_nblocks_per_row_ptr = C_NULL_PTR
+      END IF
+
       CALL validate(matrix_a)
       CALL validate(matrix_b)
       CALL validate(matrix_c)
@@ -806,6 +818,7 @@ CONTAINS
                           retain_sparsity=LOGICAL(my_retain_sparsity, C_BOOL), &
                           filter_eps=my_filter_eps, &
                           filter_eps_post=my_filter_eps_post, &
+                          nblocks_per_row=my_nblocks_per_row_ptr, &
                           flop=my_flop)
 
       IF (PRESENT(flop)) THEN
