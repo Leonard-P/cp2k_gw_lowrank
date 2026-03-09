@@ -989,7 +989,9 @@ CONTAINS
          ! need redistribute if we created new tensor for tensor 3
          CALL dbt_scale(tensor_algn_3, beta)
          CALL dbt_copy_expert(tensor_contr_3, tensor_algn_3, summation=.TRUE., move_data=.TRUE.)
-         IF (PRESENT(filter_eps)) CALL dbt_filter(tensor_algn_3, filter_eps)
+         ! Do NOT filter tensor_algn_3 here: it now contains the accumulated
+         ! result (beta*old + summand). The summand in tensor_contr_3 was
+         ! already filtered inside dbt_tas_multiply.
          ! tensor_3 automatically has correct data because tensor_algn_3 contains a matrix
          ! pointer to data of tensor_3
       END IF

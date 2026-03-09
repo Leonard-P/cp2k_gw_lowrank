@@ -523,7 +523,10 @@ CONTAINS
 
          CALL dbm_release(matrix_c_mm)
 
-         IF (PRESENT(filter_eps)) CALL dbt_tas_filter(matrix_c_rs, filter_eps)
+         ! Filter only the summand (new_c), not the accumulated result (!new_c).
+         ! When !new_c, the summand in matrix_c_mm was already post-filtered
+         ! inside dbm_multiply.
+         IF (PRESENT(filter_eps) .AND. new_c) CALL dbt_tas_filter(matrix_c_rs, filter_eps)
 
          IF (unit_nr_prv /= 0) THEN
             CALL dbt_tas_write_dist(matrix_c_rs, unit_nr_prv)
@@ -731,7 +734,10 @@ CONTAINS
 
          CALL dbm_release(matrix_c_mm)
 
-         IF (PRESENT(filter_eps)) CALL dbt_tas_filter(matrix_c_rs, filter_eps)
+         ! Filter only the summand (new_c), not the accumulated result (!new_c).
+         ! When !new_c, the summand in matrix_c_mm was already post-filtered
+         ! inside dbm_multiply.
+         IF (PRESENT(filter_eps) .AND. new_c) CALL dbt_tas_filter(matrix_c_rs, filter_eps)
 
          IF (unit_nr_prv /= 0) THEN
             CALL dbt_tas_write_dist(matrix_c_rs, unit_nr_prv)
@@ -775,7 +781,9 @@ CONTAINS
                               move_data=.TRUE.)
          CALL dbt_tas_destroy(matrix_c_rs)
          DEALLOCATE (matrix_c_rs)
-         IF (PRESENT(filter_eps)) CALL dbt_tas_filter(matrix_c, filter_eps)
+         ! Do NOT filter matrix_c here: it now contains the accumulated result
+         ! (beta*old + summand). The summand was already filtered before
+         ! accumulation via matrix_c_rs.
       ELSEIF (matrix_c%do_batched > 0) THEN
          IF (matrix_c%mm_storage%batched_out) THEN
             matrix_c%mm_storage%batched_trans = (transc_prv .NEQV. transc)
