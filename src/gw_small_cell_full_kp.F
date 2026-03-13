@@ -52,7 +52,8 @@ MODULE gw_small_cell_full_kp
                                               fm_add_kp_to_all_rs,&
                                               fm_rs_to_kp,&
                                               rs_to_kp
-   USE machine,                         ONLY: m_walltime
+   USE machine,                         ONLY: m_walltime,&
+                                              m_mkdir
    USE mathconstants,                   ONLY: z_one,&
                                               z_zero
    USE mathlib,                         ONLY: gemm_square
@@ -108,10 +109,12 @@ CONTAINS
       ! Σ^x_λσ^R = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) D_µν^S2    ]
       !                       [ sum_QR2 (σR νS1    | QR1-R2) Ṽ^tr_PQ^R2 ]
       CALL compute_Sigma_x(bs_env, qs_env)
-
+     
       ! Σ^c_λσ^R(iτ) = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) G^occ/vir_µν^S2(i|τ|) ]
       !                           [ sum_QR2 (σR νS1    | QR1-R2) Ŵ_PQ^R2(iτ)           ]
       CALL compute_Sigma_c(bs_env)
+
+
 
       ! Σ^c_λσ^R(iτ,k=0) -> Σ^c_nn(ϵ,k); ϵ_nk^GW = ϵ_nk^DFT + Σ^c_nn(ϵ,k) + Σ^x_nn(k) - v^xc_nn(k)
       CALL compute_QP_energies(bs_env)
@@ -303,11 +306,12 @@ CONTAINS
       INTEGER, DIMENSION(3)                              :: cell_R1, cell_R1_plus_cell_S, cell_R2, &
                                                             cell_S
       LOGICAL                                            :: cell_found
-      TYPE(dbt_type)                                     :: t_3c_int
+      TYPE(dbt_type)                                     :: t_3c_int, t_M_tmp
 
       CALL timeset(routineN, handle)
 
       CALL dbt_create(bs_env%t_RI_AO__AO, t_3c_int)
+      CALL dbt_create(bs_env%t_RI_AO__AO, t_M_tmp)
 
       cell_R1(1:3) = bs_env%index_to_cell_3c(1:3, i_cell_R1)
       cell_R2(1:3) = bs_env%index_to_cell_3c(1:3, i_cell_R2)
@@ -333,17 +337,20 @@ CONTAINS
          CALL dbt_contract(alpha=1.0_dp, &
                            tensor_1=t_3c_int, &
                            tensor_2=t_G_S(i_cell_S), &
-                           beta=1.0_dp, &
-                           tensor_3=t_M(i_cell_R1, i_cell_R2), &
+                           beta=0.0_dp, &
+                           tensor_3=t_M_tmp, &
                            contract_1=[3], notcontract_1=[1, 2], map_1=[1, 2], &
                            contract_2=[2], notcontract_2=[1], map_2=[3], &
                            filter_eps=bs_env%eps_filter, flop=flop)
+
+         CALL dbt_copy(t_M_tmp, t_M(i_cell_R1, i_cell_R2), summation=.TRUE., move_data=.TRUE.)
 
          IF (flop == 0_int_8) skip_DR_R1_S_Gx3c(i_task_Delta_R_local, i_cell_R1, i_cell_S) = .TRUE.
 
       END DO
 
       CALL dbt_destroy(t_3c_int)
+      CALL dbt_destroy(t_M_tmp)
 
       CALL timestop(handle)
 
@@ -490,12 +497,13 @@ CONTAINS
                                                             cell_R1_minus_R, cell_R2, &
                                                             cell_R2_minus_R
       LOGICAL                                            :: cell_found
-      TYPE(dbt_type)                                     :: t_Gocc_2, t_Gvir_2
+      TYPE(dbt_type)                                     :: t_Gocc_2, t_Gvir_2, t_chi_tmp
 
       CALL timeset(routineN, handle)
 
       CALL dbt_create(bs_env%t_RI__AO_AO, t_Gocc_2)
       CALL dbt_create(bs_env%t_RI__AO_AO, t_Gvir_2)
+      CALL dbt_create(bs_env%t_chi, t_chi_tmp)
 
       flop = 0_int_8
 
@@ -534,10 +542,12 @@ CONTAINS
             ! χ_PQ^R(iτ) = sum_λR1,νR2 M^occ_λR1,νR2,P0 M^vir_νR2,λR1,QR
             CALL dbt_contract(alpha=bs_env%spin_degeneracy, &
                               tensor_1=t_Gocc_2, tensor_2=t_Gvir_2, &
-                              beta=1.0_dp, tensor_3=t_chi_R(i_cell_R), &
+                              beta=0.0_dp, tensor_3=t_chi_tmp, &
                               contract_1=[2, 3], notcontract_1=[1], map_1=[1], &
                               contract_2=[2, 3], notcontract_2=[1], map_2=[2], &
                               filter_eps=bs_env%eps_filter, move_data=.TRUE., flop=flop_tmp)
+
+            CALL dbt_copy(t_chi_tmp, t_chi_R(i_cell_R), summation=.TRUE., move_data=.TRUE.)
 
             IF (flop_tmp == 0_int_8) bs_env%skip_DR_R_R2_MxM_chi(i_task_Delta_R_local, &
                                                                  i_cell_R2, i_cell_R) = .TRUE.
@@ -560,6 +570,7 @@ CONTAINS
 
       CALL dbt_destroy(t_Gocc_2)
       CALL dbt_destroy(t_Gvir_2)
+      CALL dbt_destroy(t_chi_tmp)
 
       CALL timestop(handle)
 
@@ -1014,6 +1025,11 @@ CONTAINS
       TYPE(dbt_type), ALLOCATABLE, DIMENSION(:)          :: D_S, Mi_Vtr_Mi_R, Sigma_x_R
       TYPE(dbt_type), ALLOCATABLE, DIMENSION(:, :)       :: t_V
 
+
+
+
+
+
       CALL timeset(routineN, handle)
 
       CALL dbt_create_2c_R(Mi_Vtr_Mi_R, bs_env%t_W, bs_env%nimages_scf_desymm)
@@ -1030,11 +1046,13 @@ CONTAINS
 
       ! Σ^x_λσ^R = sum_PR1νS1 [ sum_µS2 (λ0 µS1-S2 | PR1   ) D_µν^S2       ]
       !                       [ sum_QR2 (σR νS1    | QR1-R2) Ṽ^tr_PQ^R2 ]
+
       DO ispin = 1, bs_env%n_spin
 
          ! compute D^S(iτ) for cell S from D_µν(k) = sum_n^occ C^*_µn(k) C_νn(k):
          ! trafo k-point k -> cell S: D_µν^S = sum_k w_k D_µν(k) e^(ikS)
          CALL G_occ_vir(bs_env, 0.0_dp, D_S, ispin, occ=.TRUE., vir=.FALSE.)
+
 
          ! loop over ΔR = S_1 - R_1 which are local in the tensor subgroup
          DO i_task_Delta_R_local = 1, bs_env%n_tasks_Delta_R_local
@@ -1392,7 +1410,8 @@ CONTAINS
                                                             cell_S2
       LOGICAL                                            :: cell_found
       REAL(KIND=dp)                                      :: sign_Sigma
-      TYPE(dbt_type)                                     :: t_3c_int, t_G, t_G_2
+      TYPE(dbt_type)                                     :: t_3c_int, t_G, t_G_2, t_G_tmp, &
+                                                            t_Sigma_tmp
 
       CALL timeset(routineN, handle)
 
@@ -1402,7 +1421,9 @@ CONTAINS
 
       CALL dbt_create(bs_env%t_RI_AO__AO, t_G)
       CALL dbt_create(bs_env%t_RI_AO__AO, t_G_2)
+      CALL dbt_create(bs_env%t_RI_AO__AO, t_G_tmp)
       CALL dbt_create(bs_env%t_RI_AO__AO, t_3c_int)
+      CALL dbt_create(bs_env%t_G, t_Sigma_tmp)
 
       i_cell_Delta_R = bs_env%task_Delta_R(i_task_Delta_R_local)
 
@@ -1444,14 +1465,17 @@ CONTAINS
             ! M_λ0,νS1,PR1 = sum_µS2 ( λ0   µS1-S2    | PR1 ) G^occ/vir_µν^S2(i|τ|)
             !              = sum_µS2 ( λ-R1 µS1-S2-R1 | P0  ) G^occ/vir_µν^S2(i|τ|)
             ! for ΔR = S_1 - R_1
+
             CALL dbt_contract(alpha=1.0_dp, &
                               tensor_1=G_S(i_cell_S2), &
                               tensor_2=t_3c_int, &
-                              beta=1.0_dp, &
-                              tensor_3=t_G, &
+                              beta=0.0_dp, &
+                              tensor_3=t_G_tmp, &
                               contract_1=[2], notcontract_1=[1], map_1=[3], &
                               contract_2=[3], notcontract_2=[1, 2], map_2=[1, 2], &
                               filter_eps=bs_env%eps_filter, flop=flop_tmp)
+
+            CALL dbt_copy(t_G_tmp, t_G, summation=.TRUE., move_data=.TRUE.)
 
             IF (flop_tmp == 0_int_8 .AND. fill_skip) THEN
                bs_env%skip_DR_R1_S2_Gx3c_Sigma(i_task_Delta_R_local, i_cell_R1, i_cell_S2) = .TRUE.
@@ -1487,11 +1511,13 @@ CONTAINS
             CALL dbt_contract(alpha=sign_Sigma, &
                               tensor_1=t_G_2, &
                               tensor_2=t_W(i_cell_S1_minus_R, i_cell_R1_minus_R), &
-                              beta=1.0_dp, &
-                              tensor_3=Sigma_R(i_cell_R), &
+                              beta=0.0_dp, &
+                              tensor_3=t_Sigma_tmp, &
                               contract_1=[1, 2], notcontract_1=[3], map_1=[1], &
                               contract_2=[1, 2], notcontract_2=[3], map_2=[2], &
                               filter_eps=bs_env%eps_filter, flop=flop_tmp)
+
+            CALL dbt_copy(t_Sigma_tmp, Sigma_R(i_cell_R), summation=.TRUE., move_data=.TRUE.)
 
             flop = flop + flop_tmp
 
@@ -1520,7 +1546,9 @@ CONTAINS
 
       CALL dbt_destroy(t_G)
       CALL dbt_destroy(t_G_2)
+      CALL dbt_destroy(t_G_tmp)
       CALL dbt_destroy(t_3c_int)
+      CALL dbt_destroy(t_Sigma_tmp)
 
       CALL timestop(handle)
 

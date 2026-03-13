@@ -213,7 +213,7 @@ void benchmark_multiply(const int M, const int N, const int K, const int m,
   int64_t flop = 0;
   const double time_start_multiply = omp_get_wtime();
   dbm_multiply(false, false, 1.0, matrix_a, matrix_b, 1.0, matrix_c, false,
-               1e-8, &flop);
+               1e-8, -1.0, NULL, &flop);
   const double time_end_multiply = omp_get_wtime();
 
   if (cp_mpi_comm_rank(comm) == 0) {
@@ -222,7 +222,7 @@ void benchmark_multiply(const int M, const int N, const int K, const int m,
 
   if (NULL != matrix_d) { // Calculate result on the host for validation.
     dbm_multiply(false, false, 1.0, matrix_a, matrix_b, 1.0, matrix_d, false,
-                 1e-8, NULL);
+                 1e-8, -1.0, NULL, NULL);
 
     const double maxeps = 1E-5, epsilon = dbm_maxeps(matrix_d, matrix_c);
     if (maxeps < epsilon) {

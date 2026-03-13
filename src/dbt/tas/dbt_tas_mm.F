@@ -20,7 +20,9 @@ MODULE dbt_tas_mm
         dbm_add, dbm_clear, dbm_copy, dbm_create, dbm_create_from_template, dbm_distribution_new, &
         dbm_distribution_obj, dbm_distribution_release, dbm_get_col_block_sizes, &
         dbm_get_distribution, dbm_get_name, dbm_get_nze, dbm_get_row_block_sizes, dbm_multiply, &
-        dbm_redistribute, dbm_release, dbm_scale, dbm_type, dbm_zero
+        dbm_redistribute, dbm_release, dbm_scale, dbm_type, dbm_zero, &
+        dbm_iterator, dbm_iterator_start, dbm_iterator_next_block, &
+        dbm_iterator_blocks_left, dbm_iterator_stop
    USE dbt_tas_base,                    ONLY: &
         dbt_tas_clear, dbt_tas_copy, dbt_tas_create, dbt_tas_destroy, dbt_tas_distribution_new, &
         dbt_tas_filter, dbt_tas_get_info, dbt_tas_get_nze_total, dbt_tas_info, &
@@ -122,6 +124,9 @@ CONTAINS
       INTEGER :: batched_repl, handle, handle2, handle3, handle4, max_mm_dim, max_mm_dim_batched, &
          nsplit, nsplit_batched, nsplit_opt, numproc, split_a, split_b, split_c, split_rc, &
          unit_nr_prv
+      INTEGER                                            :: nrows_op_a, iter_row, iter_col
+      INTEGER, ALLOCATABLE                               :: nblk_per_row(:)
+      TYPE(dbm_iterator)                                 :: block_iter
       INTEGER(KIND=int_8)                                :: nze_a, nze_b, nze_c, nze_c_sum
       INTEGER(KIND=int_8), DIMENSION(2)                  :: dims_a, dims_b, dims_c
       INTEGER(KIND=int_8), DIMENSION(3)                  :: dims
@@ -577,9 +582,40 @@ CONTAINS
          CALL matrix_a%dist%info%mp_comm%sync()
          CALL timeset("dbt_tas_dbm", handle4)
          CALL timeset("dbt_tas_mm_2", handle3)
+
+         ! Compute global nblocks_per_row of op(A) across ALL groups
+         ! so that pre-screening thresholds are nsplit-independent.
+         IF (transa_prv) THEN
+            nrows_op_a = SIZE(dbm_get_col_block_sizes(matrix_a_mm))
+         ELSE
+            nrows_op_a = SIZE(dbm_get_row_block_sizes(matrix_a_mm))
+         END IF
+         ALLOCATE (nblk_per_row(nrows_op_a))
+         nblk_per_row(:) = 0
+!$OMP PARALLEL DEFAULT(NONE) SHARED(matrix_a_mm, transa_prv, nblk_per_row) &
+!$OMP PRIVATE(block_iter, iter_row, iter_col)
+         CALL dbm_iterator_start(block_iter, matrix_a_mm)
+         DO WHILE (dbm_iterator_blocks_left(block_iter))
+            CALL dbm_iterator_next_block(block_iter, iter_row, iter_col)
+            IF (transa_prv) THEN
+!$OMP ATOMIC
+               nblk_per_row(iter_col) = nblk_per_row(iter_col) + 1
+            ELSE
+!$OMP ATOMIC
+               nblk_per_row(iter_row) = nblk_per_row(iter_row) + 1
+            END IF
+         END DO
+         CALL dbm_iterator_stop(block_iter)
+!$OMP END PARALLEL
+         CALL mp_comm%sum(nblk_per_row)
+
          CALL dbm_multiply(transa=transa_prv, transb=transb_prv, alpha=alpha, matrix_a=matrix_a_mm, &
                            matrix_b=matrix_b_mm, beta=beta, matrix_c=matrix_c_mm, &
-                           filter_eps=filter_eps_prv/REAL(nsplit, KIND=dp), retain_sparsity=retain_sparsity, flop=flop)
+                           filter_eps=filter_eps_prv, &
+                           retain_sparsity=retain_sparsity, flop=flop, &
+                           filter_eps_post=0.0_dp, &
+                           nblocks_per_row=nblk_per_row)
+         DEALLOCATE (nblk_per_row)
          CALL matrix_a%dist%info%mp_comm%sync()
          CALL timestop(handle3)
          CALL timestop(handle4)

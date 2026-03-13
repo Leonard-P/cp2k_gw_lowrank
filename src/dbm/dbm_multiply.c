@@ -314,7 +314,11 @@ void dbm_multiply(const bool transa, const bool transb, const double alpha,
                   const dbm_matrix_t *matrix_a, const dbm_matrix_t *matrix_b,
                   const double beta, dbm_matrix_t *matrix_c,
                   const bool retain_sparsity, const double filter_eps,
+                  const double filter_eps_post, const int *nblocks_per_row,
                   int64_t *flop) {
+  // Use filter_eps for post-filter when filter_eps_post is negative (legacy).
+  const double post_eps =
+      (filter_eps_post < 0.0) ? filter_eps : filter_eps_post;
   assert(omp_get_num_threads() == 1);
   assert(matrix_a != NULL && matrix_b != NULL && matrix_c != NULL);
 
@@ -348,7 +352,20 @@ void dbm_multiply(const bool transa, const bool transb, const double alpha,
   }
 
   // Compute filter thresholds for each row.
-  float *rows_max_eps = compute_rows_max_eps(transa, matrix_a, filter_eps);
+  float *rows_max_eps;
+  if (nblocks_per_row != NULL) {
+    // Use caller-provided global block counts (e.g. from TAS CASE 2).
+    const int nrows = (transa) ? matrix_a->ncols : matrix_a->nrows;
+    rows_max_eps = malloc(nrows * sizeof(float));
+    assert(rows_max_eps != NULL || nrows == 0);
+    for (int i = 0; i < nrows; i++) {
+      const float f =
+          ((float)filter_eps) / ((float)imax(1, nblocks_per_row[i]));
+      rows_max_eps[i] = f * f;
+    }
+  } else {
+    rows_max_eps = compute_rows_max_eps(transa, matrix_a, filter_eps);
+  }
 
   // Start uploading matrix_c to the GPU.
   backend_context_t *ctx = backend_start(matrix_c);
@@ -402,7 +419,7 @@ void dbm_multiply(const bool transa, const bool transb, const double alpha,
   free(rows_max_eps);
 
   // Final filter pass.
-  dbm_filter(matrix_c, filter_eps);
+  dbm_filter(matrix_c, post_eps);
 }
 
 // EOF

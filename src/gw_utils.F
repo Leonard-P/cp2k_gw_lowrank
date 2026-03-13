@@ -1070,8 +1070,9 @@ CONTAINS
       CALL get_qs_env(qs_env, cell=cell, particle_set=particle_set, para_env=para_env)
 
 !$OMP PARALLEL DEFAULT(NONE) &
-!$OMP SHARED(t_3c_int, max_dist_AO_atoms, num_cells, index_to_cell, particle_set, cell) &
-!$OMP PRIVATE(iter,atom_ind,rab, abs_rab, atom_1, atom_2)
+!$OMP SHARED(t_3c_int, num_cells, index_to_cell, particle_set, cell) &
+!$OMP PRIVATE(iter,atom_ind,rab, abs_rab, atom_1, atom_2) &
+!$OMP REDUCTION(MAX:max_dist_AO_atoms)
       CALL dbt_iterator_start(iter, t_3c_int)
       DO WHILE (dbt_iterator_blocks_left(iter))
          CALL dbt_iterator_next_block(iter, atom_ind)
@@ -2969,6 +2970,8 @@ CONTAINS
       END DO ! ikp
 
       CALL bs_env%para_env%max(cond_nr_max)
+      CALL bs_env%para_env%max(max_ev)
+      CALL bs_env%para_env%min(min_ev)
 
       u = bs_env%unit_nr
       IF (u > 0) THEN
