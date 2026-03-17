@@ -40,7 +40,8 @@ MODULE gw_small_cell_full_kp
                                               get_V_tr_R,&
                                               is_cell_in_index_to_cell,&
                                               power,&
-                                              time_to_freq
+                                              time_to_freq,&
+                                              write_complex_matrix_to_file
    USE gw_lowrank_approx,               ONLY: calculate_W_lowrank_projector,&
                                               W_storage_pipeline,&
                                               bs_env_do_LR
@@ -592,7 +593,8 @@ CONTAINS
       COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)  :: M_inv, M_inv_V_sqrt, V_sqrt, W_k, W_k_local, &
                                                             W_lowrank_training_sums
       INTEGER                                            :: handle, i_t, ikp, ikp_local, j_w, n_RI, &
-                                                            nimages_scf_desymm, n_rank
+                                                            nimages_scf_desymm, n_rank, ierr, handle_lr
+      CHARACTER(LEN=default_string_length)               :: dir_freq, filename
       REAL(KIND=dp)                                      :: freq_j, t1, time_i, weight_ij
       REAL(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)     :: chi_R, W_R, M_R, MWM_R
 
@@ -695,6 +697,12 @@ CONTAINS
 
       DEALLOCATE(M_inv_V_sqrt, V_sqrt, chi_R)
       DEALLOCATE(W_k, chi_k_w, M_inv)
+
+      ikp_local = 0
+      DO ikp = 1, bs_env%nkp_scf_desymm
+         IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
+         ikp_local = ikp_local + 1
+      END DO
       ALLOCATE(W_k_local(n_RI, n_RI, ikp_local))
 
       ! obtain low-rank projectors for each (local) k-point
@@ -721,6 +729,8 @@ CONTAINS
             n_rank = SIZE(W_lowrank_projector, 2)
             
             ! below: project down (and, for now, up) by inserting the "identity" LL^H with L a n_RI x n_rank matrix
+            CALL timeset(routineN//"_LR", handle_lr)
+
             CALL ZGEMM('N', 'C', n_RI, n_RI, n_rank, &
                      z_one, W_lowrank_projector, n_RI, W_lowrank_projector, n_RI, &
                      z_zero, W_projector_up_down, n_RI)
@@ -737,6 +747,7 @@ CONTAINS
                ! Reuse storage of training sums for the projectors.
                W_lowrank_training_sums(:, :, ikp_local) = W_projector_up_down(:, :)
             END IF
+            CALL timestop(handle_lr)
          END DO
       END IF
 
@@ -746,6 +757,13 @@ CONTAINS
          ! load W_k from disk
          ALLOCATE(W_k(n_RI, n_RI, bs_env%nkp_scf_desymm))
          CALL W_storage_pipeline(bs_env, j_w, W_k, mode="read_and_delete") 
+
+         ! Dump local W_k blocks as text for debugging.
+         IF (bs_env%para_env%is_source()) THEN
+            CALL m_mkdir("W_k_freq", ierr)
+            WRITE(dir_freq, '(A,I4.4)') "W_k_freq/freq_", j_w
+            CALL m_mkdir(TRIM(dir_freq), ierr)
+         END IF
          
          ! As above, never keep full W_k AND full W_R in memory. Save to local batch, then allocate MWM_R.
          ikp_local = 0
@@ -753,6 +771,10 @@ CONTAINS
             IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
             ikp_local = ikp_local + 1
             W_k_local(:, :, ikp_local) = W_k(:, :, ikp)
+            IF (bs_env%para_env%is_source()) THEN
+               WRITE(filename, '(A,A,I4.4,A)') TRIM(dir_freq), "/kp", ikp, ".txt"
+               CALL write_complex_matrix_to_file(W_k(:, :, ikp), TRIM(filename))
+            END IF
          END DO
          DEALLOCATE(W_k)
          ALLOCATE(MWM_R(n_RI, n_RI, nimages_scf_desymm))
@@ -764,10 +786,12 @@ CONTAINS
             ikp_local = ikp_local + 1
             
             IF (bs_env_do_LR(bs_env)) THEN
+               CALL timeset(routineN//"_LR_apply", handle_lr)
                ! apply LR approx via M^b LL^T M^a W M^a LL^T M^b
                CALL gemm_square(W_lowrank_training_sums(:, :, ikp_local), 'N', W_k_local(:, :, ikp_local), 'N', &
                                 W_lowrank_training_sums(:, :, ikp_local), 'C', W_k_tmp)
                W_k_local(:, :, ikp_local) = W_k_tmp(:, :)
+               CALL timestop(handle_lr)
             END IF
 
             CALL add_kp_to_all_rs(W_k_local(:, :, ikp_local), MWM_R, bs_env%kpoints_scf_desymm, ikp)

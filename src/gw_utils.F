@@ -3425,9 +3425,11 @@ CONTAINS
    SUBROUTINE write_reals_to_file(reals, filename)
       REAL(KIND=dp), INTENT(in), DIMENSION(:)            :: reals
       CHARACTER(LEN=*), INTENT(in)                       :: filename
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'write_reals_to_file'
 
-      INTEGER                                            :: iunit, i
+      INTEGER                                            :: iunit, i, handle
 
+      CALL timeset(routineN, handle)
       CALL open_file(TRIM(filename), unit_number=iunit, file_status="REPLACE", file_action="WRITE")
 
       DO i = 1, SIZE(reals)
@@ -3435,6 +3437,7 @@ CONTAINS
       END DO
 
       CALL close_file(iunit)
+      CALL timestop(handle)
 
    END SUBROUTINE write_reals_to_file
 
@@ -3442,10 +3445,12 @@ CONTAINS
    SUBROUTINE write_real_matrix_to_file(matrix, filename)
       REAL(KIND=dp), INTENT(in), DIMENSION(:, :)         :: matrix
       CHARACTER(LEN=*), INTENT(in)                       :: filename
+      CHARACTER(LEN=*), PARAMETER                        :: routineN = 'write_real_matrix_to_file'
 
-      INTEGER                                            :: iunit, i, j, cols
+      INTEGER                                            :: iunit, i, j, cols, handle
       CHARACTER(LEN=100)                                 :: fmt_str
 
+      CALL timeset(routineN, handle)
       cols = SIZE(matrix, 2)
       
       CALL open_file(TRIM(filename), unit_number=iunit, file_status="REPLACE", file_action="WRITE")
@@ -3459,6 +3464,7 @@ CONTAINS
       END DO
 
       CALL close_file(iunit)
+      CALL timestop(handle)
 
    END SUBROUTINE write_real_matrix_to_file
 
@@ -3466,9 +3472,12 @@ CONTAINS
       COMPLEX(KIND=dp), INTENT(in), DIMENSION(:, :)      :: matrix
       CHARACTER(LEN=*), INTENT(in)                       :: filename
 
-      INTEGER                                            :: iunit, i, j, cols, num_floats
+      CHARACTER(LEN=*), PARAMETER                      :: routineN = 'write_complex_matrix_to_file'
+
+      INTEGER                                            :: iunit, i, j, cols, num_floats, handle
       CHARACTER(LEN=100)                                 :: fmt_str
 
+      CALL timeset(routineN, handle)
       cols = SIZE(matrix, 2)
       num_floats = cols * 2
       
@@ -3482,6 +3491,7 @@ CONTAINS
       END DO
 
       CALL close_file(iunit)
+      CALL timestop(handle)
 
    END SUBROUTINE write_complex_matrix_to_file
 

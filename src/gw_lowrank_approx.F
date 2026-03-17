@@ -143,9 +143,13 @@ CONTAINS
       COMPLEX(KIND=dp), DIMENSION(:, :, :), INTENT(INOUT)  :: W_k
       CHARACTER(LEN=*), INTENT(IN)                         :: mode
 
+      CHARACTER(LEN=*), PARAMETER                          :: routineN = 'W_storage_pipeline'
+
       CHARACTER(LEN=default_string_length)                 :: filename
-      INTEGER                                              :: unit_nr, iostat
+      INTEGER                                              :: unit_nr, iostat, handle
       LOGICAL                                              :: is_master, file_exists
+
+      CALL timeset(routineN, handle)
 
       is_master = (bs_env%para_env%is_source())
       WRITE(filename, '(A,I3.3,A)') "W_realspace_freq_", freq_idx, ".dat"
@@ -203,6 +207,8 @@ CONTAINS
          CPABORT("Invalid mode for W_storage_pipeline. Use 'write', 'read', or 'read_and_delete'.")
       END SELECT
 
+      CALL timestop(handle)
+
    END SUBROUTINE W_storage_pipeline
 
 
@@ -211,13 +217,13 @@ CONTAINS
    !> \param bs_env The bandstructure environment
    !> \return use_lr True if rank or epsilon threshold is set
    ! **************************************************************************************************
-      PURE FUNCTION bs_env_do_LR(bs_env) RESULT(use_lr)
-         TYPE(post_scf_bandstructure_type), INTENT(IN)      :: bs_env
-         LOGICAL                                            :: use_lr
+   PURE FUNCTION bs_env_do_LR(bs_env) RESULT(use_lr)
+      TYPE(post_scf_bandstructure_type), INTENT(IN)      :: bs_env
+      LOGICAL                                            :: use_lr
 
-         use_lr = (bs_env%low_rank_approx_W_rank > 0) .OR. &
-                  (bs_env%low_rank_approx_W_eps > 0.0_dp)
+      use_lr = (bs_env%low_rank_approx_W_rank > 0) .OR. &
+               (bs_env%low_rank_approx_W_eps > 0.0_dp)
 
-      END FUNCTION bs_env_do_LR
+   END FUNCTION bs_env_do_LR
 
 END MODULE gw_lowrank_approx
