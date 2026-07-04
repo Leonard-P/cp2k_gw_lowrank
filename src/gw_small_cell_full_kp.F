@@ -589,7 +589,8 @@ CONTAINS
       CHARACTER(LEN=*), PARAMETER :: routineN = 'compute_W_real_space'
 
       COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :)     :: chi_k_w, eps_k_w, W_k_w, M, W_k_tmp, &
-                                                            W_lowrank_projector, W_projector_up_down
+                                 W_lowrank_projector, W_projector_up_down, &
+                                 W_lowrank_training_sum
       COMPLEX(KIND=dp), ALLOCATABLE, DIMENSION(:, :, :)  :: M_inv, M_inv_V_sqrt, V_sqrt, W_k, W_k_local, &
                                                             W_lowrank_training_sums
       INTEGER                                            :: handle, i_t, ikp, ikp_local, j_w, n_RI, &
@@ -614,6 +615,7 @@ CONTAINS
          END DO
          ALLOCATE (W_lowrank_training_sums(n_RI, n_RI, ikp_local))
          W_lowrank_training_sums(:, :, :) = z_zero
+         ALLOCATE (W_lowrank_training_sum(n_RI, n_RI))
       END IF
 
       t1 = m_walltime()
@@ -698,6 +700,17 @@ CONTAINS
       DEALLOCATE(M_inv_V_sqrt, V_sqrt, chi_R)
       DEALLOCATE(W_k, chi_k_w, M_inv)
 
+      IF (bs_env_do_LR(bs_env)) THEN
+         W_lowrank_training_sum(:, :) = z_zero
+         DO ikp_local = 1, SIZE(W_lowrank_training_sums, 3)
+            W_lowrank_training_sum(:, :) = W_lowrank_training_sum(:, :) + W_lowrank_training_sums(:, :, ikp_local)
+         END DO
+         CALL bs_env%para_env%sum(W_lowrank_training_sum)
+         DO ikp_local = 1, SIZE(W_lowrank_training_sums, 3)
+            W_lowrank_training_sums(:, :, ikp_local) = W_lowrank_training_sum(:, :)
+         END DO
+      END IF
+
       ikp_local = 0
       DO ikp = 1, bs_env%nkp_scf_desymm
          IF (MODULO(ikp, bs_env%para_env%num_pe) /= bs_env%para_env%mepos) CYCLE
@@ -752,6 +765,7 @@ CONTAINS
       END IF
 
       IF(ALLOCATED(M_R)) DEALLOCATE(M_R)
+      IF (ALLOCATED(W_lowrank_training_sum)) DEALLOCATE(W_lowrank_training_sum)
 
       DO j_w = 1, bs_env%num_time_freq_points
          ! load W_k from disk
