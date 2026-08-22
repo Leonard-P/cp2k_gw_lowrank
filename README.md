@@ -19,3 +19,6 @@ Respective input parameters for the `&GW` section:
 
 ### `feature/gw_lowrank_kindependent`
 Analogous to the previous branch, but computes a single map $L$ using a training sum over all frequency points and *all* k-points. That is, one universal low-rank subspace for all matrices $W$.
+
+## DOI
+[![DOI](https://zenodo.org/badge/1140596301.svg)](https://doi.org/10.5281/zenodo.22060610)
