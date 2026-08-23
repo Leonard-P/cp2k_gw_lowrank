@@ -20,5 +20,10 @@ Respective input parameters for the `&GW` section:
 ### `feature/gw_lowrank_kindependent`
 Analogous to the previous branch, but computes a single map $L$ using a training sum over all frequency points and *all* k-points. That is, one universal low-rank subspace for all matrices $W$.
 
+
+## Code Modification: MPI-Independent `dbt` Filtering
+Beyond the LRA implementation, this CP2K fork modifies the `dbt` tensor filtering API. Previously, local epsilon thresholds were tied to the MPI grid distribution (number of blocks per rank). For light settings with filter threshold $10^{-6}$, this induced band gap deviations of 1-11 meV depending on the MPI grid. The fork enforces a global filtering threshold ($\epsilon / N_\mathrm{blocks}$ instead of $\epsilon / (N_\mathrm{ranks}\cdot N_\mathrm{blocks\_on\_local\_rank})$). The LRA is applied after some contractions that perform the dbt filtering, such that this fix helps to ensure that the LRA is evaluated on the same data regardless of MPI distribution. Still, filtering happens also after the LRA so that the accuracy benchmark will include the numerical noise from the filtering. 
+
+
 ## DOI
 [![DOI](https://zenodo.org/badge/1140596301.svg)](https://doi.org/10.5281/zenodo.22060610)
